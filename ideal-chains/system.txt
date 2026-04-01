@@ -1,0 +1,8 @@
+number_of_monomers = 1048450.0
+box_x = 256.0
+box_y = 256.0
+box_z = 256.0
+number_of_linear_chains = 32260.0
+number_of_crosslinkers = 16130.0
+chainLength = 32.0
+mcs = 100000000.0
