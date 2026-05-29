@@ -1,0 +1,5 @@
+Step: 16
+Scale_z (lambda): 1.480000
+Cumulative strain: 48.0000 %
+Stress: 0.079558
+Remaining bonds: 29953/29968

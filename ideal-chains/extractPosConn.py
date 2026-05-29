@@ -1,9 +1,12 @@
 import numpy as np
 import time
+from collections import defaultdict
+
 t0 = time.time()
+
 info=[]
 bonds=[]
-with open("LastConfig.bfm", "r") as file:
+with open("LastConfig2.bfm", "r") as file:
     data = file.readlines()
     for i,line in enumerate(data):
         if (line.startswith("!") or line.startswith("#!")) and "=" in line:
@@ -79,7 +82,6 @@ for i, chain in enumerate(unique_chains):
 max_len = max(len(r) for r in chains_xlinks)
 table1_padded = np.array([r + [np.nan]*(max_len-len(r)) for r in chains_xlinks])
 
-from collections import defaultdict
 
 connections = defaultdict(list)  # xlinkID -> set of connected xlinks
 
@@ -108,7 +110,7 @@ for xlink, conn_list in connections.items():
 
 rows = np.array(rows, dtype=int)
 header = "\t".join(["xlinkID"] + [f"xlink_{i+1}" for i in range(max_len)])
-np.savetxt("connected_xlinks.txt", rows, fmt="%.0f", delimiter="\t", header=header, comments="")
-np.savetxt('crosslinks-positions.txt', crosslinks, fmt="%.0f")
+np.savetxt("connected_xlinksTEST1.txt", rows, fmt="%.0f", delimiter="\t", header=header, comments="")
+np.savetxt('crosslinks-positionsTEST1.txt', crosslinks, fmt="%.0f")
 
 print(f"Execution time: {time.time() - t0:.2f} seconds")

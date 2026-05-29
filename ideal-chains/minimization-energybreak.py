@@ -175,9 +175,6 @@ t0 = time()
 # Load connection table (first column = ID, next columns = connected IDs)
 connections0 = np.loadtxt("connected_xlinks.txt", skiprows=1, delimiter="\t", dtype=int)
 connections=connections0.copy()
-# Sort by the first column (xlinkID)
-sorted_indices = np.argsort(connections[:, 0])
-connections = connections[sorted_indices]-1  # convert to 0-based indexing
 
 params = {}
 with open("system.txt", "r") as f:
