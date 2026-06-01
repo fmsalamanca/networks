@@ -113,10 +113,11 @@ def compute_total_stress(positions, connections, box,N=None,b=np.sqrt(10)):
         pos = positions[i]
 
         sum_delta = np.zeros(3, dtype=positions.dtype)
-        for k in range(connections.shape[1]):
+        for k in range(1,connections.shape[1]):
+            print("Connection found between", i, "and", k, flush=True)
+
             conn_val = connections[i,k]
-            if conn_val != -1:
-                
+            if conn_val != -1 and i != conn_val:
                 conn_pos = positions[conn_val]
                 delta = conn_pos - pos
                 delta = np.abs((delta + 0.5*box) % box - 0.5 * box)
@@ -142,10 +143,9 @@ def compute_total_force(positions, connections, box,N=None,b=np.sqrt(10)):
         pos = positions[i]
 
         sum_delta = np.zeros(3, dtype=positions.dtype)
-        for k in range(connections.shape[1]):
+        for k in range(1, connections.shape[1]):
             conn_val = connections[i,k]
-            if conn_val != -1:
-                
+            if conn_val != -1 and i != conn_val:
                 conn_pos = positions[conn_val]
                 delta = conn_pos - pos
                 delta = np.abs((delta + 0.5*box) % box - 0.5 * box)
@@ -170,12 +170,13 @@ def count_bonds(connections):
 ###################################################
 
 # Load crosslink positions
-positions = np.loadtxt("crosslinks-positions.txt")
+positions = np.loadtxt("crosslinks-positionsTEST2.txt")
 t0 = time()
 # Load connection table (first column = ID, next columns = connected IDs)
-connections0 = np.loadtxt("connected_xlinks.txt", skiprows=1, delimiter="\t", dtype=int)
+connections0 = np.loadtxt("connected_xlinksTEST2.txt", skiprows=1, delimiter="\t", dtype=int)
 connections=connections0.copy()
 
+connections = connections -1  # convert to 0-based indexing, with -1 for no connection
 params = {}
 with open("system.txt", "r") as f:
     for line in f:
@@ -189,7 +190,7 @@ box_z                   = params["box_z"]
 number_of_linear_chains = params["number_of_linear_chains"]
 number_of_crosslinkers  = params["number_of_crosslinkers"]
 chainLength             = params["chainLength"]
-mcs                     = params["mcs"]
+#mcs                     = params["mcs"]
 
 box = np.array([box_x, box_y, box_z], dtype=positions.dtype)
 
