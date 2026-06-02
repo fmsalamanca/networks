@@ -21,8 +21,12 @@ def func(positions, connections, box, max_steps=10000, b=np.sqrt(10), N=None, to
             pos = positions[i] # NO NEED TO APPLY PBC HERE, AS IT WILL BE DONE IN THE DELTA CALCULATION
             sum_delta = np.zeros(3, dtype=positions.dtype)
             count = 0
+            
             for k in range(1,connections.shape[1]):
+
                 conn_val = connections[i,k]
+                if i == 80657:
+                    print(connections[i,k])
                 if conn_val != -1:
                     conn_pos = positions[conn_val]
                     delta = conn_pos - pos
