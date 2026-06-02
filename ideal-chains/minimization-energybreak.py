@@ -12,7 +12,7 @@ def func(positions, connections, box, max_steps=10000, b=np.sqrt(10), N=None, to
     while step < max_steps:
         current_energy = 0
         indices = np.random.permutation(nxlink)  # from 0 to nxlink-1
-        indices = np.arange(nxlink)  # from 0 to nxlink-1
+        #indices = np.arange(nxlink)  # from 0 to nxlink-1
 
         new_positions = positions.copy()
         # main loop
@@ -106,15 +106,12 @@ def compute_total_stress(positions, connections, box,N=None,b=np.sqrt(10)):
     indices = np.random.permutation(nxlink)  # from 0 to nxlink-1
     #indices = np.arange(nxlink)  # from 0 to nxlink-1
 
-    b = np.sqrt(10)
     total_delta = np.zeros(3, dtype=positions.dtype)
     for ii in range(nxlink):
         i = indices[ii]
         pos = positions[i]
-
         sum_delta = np.zeros(3, dtype=positions.dtype)
         for k in range(1,connections.shape[1]):
-            print("Connection found between", i, "and", k, flush=True)
 
             conn_val = connections[i,k]
             if conn_val != -1 and i != conn_val:
@@ -203,12 +200,12 @@ max_iter = 100
 fd_step = 1e-5
 damping = 1
 
-def relax_box_uniaxial(positions, box,N=None):
+def relax_box_uniaxial(positions, connections, box, N=None):
     L_prev = (box[0]+box[1])/2  # using x (same as y) as the free dimension
     box[0] = box[1] = L_prev        # enforce symmetry immediately
     # Initial relaxation at current box
     positions = func(positions, connections, box=box,N=N)
-    stress_prev = compute_total_stress(positions, connections=connections, box=box,N=N)
+    stress_prev = compute_total_stress(positions, connections, box=box,N=N)
     f_prev = (stress_prev[0]+stress_prev[1])/2 - stress_prev[2]  # target: sigma_x == sigma_y == sigma_z
     
     if abs(f_prev) < tol_stress:
@@ -260,7 +257,7 @@ def relax_box_uniaxial(positions, box,N=None):
 
     raise RuntimeError('Secant method did not converge')
   
-positions,stress,box = relax_box_uniaxial(positions,box,N=chainLength+1)
+positions,stress,box = relax_box_uniaxial(positions,connections,box,N=chainLength+1)
 stress = stress[2] - (stress[0]+stress[1])/2
 np.savetxt(
     "initial_equilibrated_positions.txt",
