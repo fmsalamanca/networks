@@ -3,6 +3,7 @@ import numpy as np
 from numba import njit
 import os
 import shutil
+import random
 
 @njit
 def func(positions, connections, box, max_steps=10000, b=np.sqrt(10), N=None, tolerance=1e-4):
@@ -11,13 +12,14 @@ def func(positions, connections, box, max_steps=10000, b=np.sqrt(10), N=None, to
     prev_energy = np.inf
     while step < max_steps:
         current_energy = 0
-        indices = np.random.permutation(nxlink)  # from 0 to nxlink-1
+        #indices = np.random.permutation(nxlink)  # from 0 to nxlink-1
+        indices = connections[:,0].copy()  # use xlink IDs from connections table, which are already sorted and unique
+        np.random.shuffle(indices)  # shuffle in-place for random order each MCS
         #indices = np.arange(nxlink)  # from 0 to nxlink-1
 
         new_positions = positions.copy()
         # main loop
-        for ii in range(nxlink):
-            i = indices[ii]
+        for i in indices:
             pos = positions[i] # NO NEED TO APPLY PBC HERE, AS IT WILL BE DONE IN THE DELTA CALCULATION
             sum_delta = np.zeros(3, dtype=positions.dtype)
             count = 0
@@ -25,8 +27,6 @@ def func(positions, connections, box, max_steps=10000, b=np.sqrt(10), N=None, to
             for k in range(1,connections.shape[1]):
 
                 conn_val = connections[i,k]
-                if i == 80657:
-                    print(connections[i,k])
                 if conn_val != -1:
                     conn_pos = positions[conn_val]
                     delta = conn_pos - pos
@@ -74,9 +74,10 @@ def breakage_potential(positions, connections, box, U_crit,b=np.sqrt(10),N=None,
     nxlink = len(positions)
     indices = np.random.permutation(nxlink)  # from 0 to nxlink-1
     indices = np.arange(nxlink)  # from 0 to nxlink-1
+    indices = connections[:,0]  # use xlink IDs from connections table, which are already sorted and unique
+    np.random.shuffle(indices)  # shuffle in-place for random order each MCS
     test=1
-    for ii in range(nxlink):
-        i   = indices[ii]
+    for i in indices:
         pos = positions[i] % box
         for k in range(1,connections.shape[1]): # 1 is to ignore self connection
             conn_val = connections[i,k]
@@ -109,14 +110,14 @@ def compute_total_stress(positions, connections, box,N=None,b=np.sqrt(10)):
 
     indices = np.random.permutation(nxlink)  # from 0 to nxlink-1
     #indices = np.arange(nxlink)  # from 0 to nxlink-1
-
+    indices = connections[:,0]  # use xlink IDs from connections table, which are already sorted and unique
+    np.random.shuffle(indices)  # shuffle in-place for random order each MCS
     total_delta = np.zeros(3, dtype=positions.dtype)
-    for ii in range(nxlink):
-        i = indices[ii]
+    for i in indices:
         pos = positions[i]
         sum_delta = np.zeros(3, dtype=positions.dtype)
         for k in range(1,connections.shape[1]):
-
+            print(i,k,flush=True)
             conn_val = connections[i,k]
             if conn_val != -1 and i != conn_val:
                 conn_pos = positions[conn_val]
@@ -136,11 +137,11 @@ def compute_total_force(positions, connections, box,N=None,b=np.sqrt(10)):
 
     indices = np.random.permutation(nxlink)  # from 0 to nxlink-1
     #indices = np.arange(nxlink)  # from 0 to nxlink-1
-
+    indices = connections[:,0]  # use xlink IDs from connections table, which are already sorted and unique
+    np.random.shuffle(indices)  # shuffle in-place for random order each MCS
     b = np.sqrt(10)
     total_delta = np.zeros(3, dtype=positions.dtype)
-    for ii in range(nxlink):
-        i = indices[ii]
+    for i in indices:
         pos = positions[i]
 
         sum_delta = np.zeros(3, dtype=positions.dtype)
