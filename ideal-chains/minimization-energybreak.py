@@ -1,11 +1,11 @@
 from time import time
 import numpy as np
-from numba import njit
+import numba
 import os
 import shutil
 import random
 
-@njit
+@numba.njit
 def func(positions, connections, box, max_steps=10000, b=np.sqrt(10), N=None, tolerance=1e-4):
     nxlink = len(positions)
     step = 0
@@ -72,16 +72,15 @@ def func(positions, connections, box, max_steps=10000, b=np.sqrt(10), N=None, to
 def breakage_potential(positions, connections, box, U_crit,b=np.sqrt(10),N=None,log_file=None):
     broken = False
     nxlink = len(positions)
-    indices = np.random.permutation(nxlink)  # from 0 to nxlink-1
-    indices = np.arange(nxlink)  # from 0 to nxlink-1
-    indices = connections[:,0]  # use xlink IDs from connections table, which are already sorted and unique
+    #indices = np.random.permutation(nxlink)  # from 0 to nxlink-1
+    indices = connections[:,0].copy()  # use xlink IDs from connections table, which are already sorted and unique
     np.random.shuffle(indices)  # shuffle in-place for random order each MCS
     test=1
     for i in indices:
         pos = positions[i] % box
         for k in range(1,connections.shape[1]): # 1 is to ignore self connection
             conn_val = connections[i,k]
-            if conn_val != -1 and i != conn_val:
+            if conn_val != -1:
             
                 conn_pos = positions[conn_val] % box
 
@@ -108,23 +107,20 @@ def breakage_potential(positions, connections, box, U_crit,b=np.sqrt(10),N=None,
 def compute_total_stress(positions, connections, box,N=None,b=np.sqrt(10)):
     nxlink = len(positions)
 
-    indices = np.random.permutation(nxlink)  # from 0 to nxlink-1
-    #indices = np.arange(nxlink)  # from 0 to nxlink-1
-    indices = connections[:,0]  # use xlink IDs from connections table, which are already sorted and unique
+    indices = connections[:,0].copy()  # use xlink IDs from connections table, which are already sorted and unique
     np.random.shuffle(indices)  # shuffle in-place for random order each MCS
+    #indices = np.arange(nxlink)  # from 0 to nxlink-1
     total_delta = np.zeros(3, dtype=positions.dtype)
     for i in indices:
         pos = positions[i]
         sum_delta = np.zeros(3, dtype=positions.dtype)
         for k in range(1,connections.shape[1]):
-            print(i,k,flush=True)
             conn_val = connections[i,k]
-            if conn_val != -1 and i != conn_val:
+            if conn_val != -1:
                 conn_pos = positions[conn_val]
                 delta = conn_pos - pos
                 delta = np.abs((delta + 0.5*box) % box - 0.5 * box)
-                
-            sum_delta += delta
+                sum_delta += delta
         total_delta += sum_delta
     forcevector = 3/(N*b**2)*total_delta    #eq 2.96 from rubinstein, in units of kT, using ideal chain model with Kuhn length b and n segments per chain
     stress = forcevector[2]/(box[0]*box[1]) - (forcevector[0]/(box[1]*box[2]) + forcevector[1]/(box[0]*box[2]))/2
@@ -135,11 +131,8 @@ def compute_total_stress(positions, connections, box,N=None,b=np.sqrt(10)):
 def compute_total_force(positions, connections, box,N=None,b=np.sqrt(10)):
     nxlink = len(positions)
 
-    indices = np.random.permutation(nxlink)  # from 0 to nxlink-1
-    #indices = np.arange(nxlink)  # from 0 to nxlink-1
-    indices = connections[:,0]  # use xlink IDs from connections table, which are already sorted and unique
+    indices = connections[:,0].copy()  # use xlink IDs from connections table, which are already sorted and unique
     np.random.shuffle(indices)  # shuffle in-place for random order each MCS
-    b = np.sqrt(10)
     total_delta = np.zeros(3, dtype=positions.dtype)
     for i in indices:
         pos = positions[i]
@@ -147,12 +140,12 @@ def compute_total_force(positions, connections, box,N=None,b=np.sqrt(10)):
         sum_delta = np.zeros(3, dtype=positions.dtype)
         for k in range(1, connections.shape[1]):
             conn_val = connections[i,k]
-            if conn_val != -1 and i != conn_val:
+            if conn_val != -1:
                 conn_pos = positions[conn_val]
                 delta = conn_pos - pos
                 delta = np.abs((delta + 0.5*box) % box - 0.5 * box)
 
-            sum_delta += delta
+                sum_delta += delta
         total_delta += sum_delta
     forcevector = 3/(N*b**2)*total_delta    #eq 2.96 from rubinstein, in units of kT, using ideal chain model with Kuhn length b and n segments per chain
     return forcevector
@@ -175,10 +168,27 @@ def count_bonds(connections):
 positions = np.loadtxt("crosslinks-positionsTEST2.txt")
 t0 = time()
 # Load connection table (first column = ID, next columns = connected IDs)
-connections0 = np.loadtxt("connected_xlinksTEST2.txt", skiprows=1, delimiter="\t", dtype=int)
-connections=connections0.copy()
+connections = np.loadtxt("connected_xlinksTEST2.txt", skiprows=1, delimiter="\t", dtype=int)
 
 connections = connections -1  # convert to 0-based indexing, with -1 for no connection
+connections = connections.astype(int)
+#for i in range(1, len(connections)):
+#    if connections[i, 0] != connections[i-1, 0] + 1:
+#        guilty = connections[i, 0]  # the first overestimated ID
+#        print(f"Found overestimated ID: {guilty} at row {i}, correcting...", flush=True)
+#        break
+gap =np.where(np.diff(connections[:,0])!=1)[0]
+guilty = connections[gap[0]+1, 0]  # the first overestimated ID
+print(f"Found overestimated ID: {guilty} at row {gap[0]+1}, correcting...", flush=True)
+
+@numba.njit
+def fix_connections(connections,guilty):
+    for i in range(len(connections)):
+        for j in range(0, connections.shape[1]):
+            if connections[i,j] >= guilty:
+                connections[i,j] -= 1
+    return connections
+connections = fix_connections(connections,guilty)
 params = {}
 with open("system.txt", "r") as f:
     for line in f:
@@ -272,21 +282,22 @@ np.savetxt(
     comments=''
 )
 
-total_initial_bonds = count_bonds(connections)
-
-
 #print("strain-controlled deformation with bond breakage...")
 # ----------------------------
 # Parameters
 # ----------------------------
-total_strain = 600     # total strain (%) applied in z
-n_steps = 200          # number of increments
+total_strain = 700     # total strain (%) applied in z
+n_steps = 100          # number of increments
 dstrain = total_strain / n_steps   # strain increment per step (%)
 box_curr = box
 
 N = chainLength+1
 b = np.sqrt(10)
 U_crit = (N*b)**2/(N*b**2) # in units of kT, using ideal chain model with Kuhn length b and n segments per chain
+
+connections,broken = breakage_potential(positions=positions, connections=connections, box=box_curr, U_crit=U_crit,N=chainLength+1,
+                                                        log_file='broken_connections.txt')
+total_initial_bonds = count_bonds(connections)
 
 os.makedirs("./output", exist_ok=True)
 
