@@ -165,10 +165,10 @@ def count_bonds(connections):
 ###################################################
 
 # Load crosslink positions
-positions = np.loadtxt("crosslinks-positionsTEST2.txt")
+positions = np.loadtxt("crosslinks-positions2.txt")
 t0 = time()
 # Load connection table (first column = ID, next columns = connected IDs)
-connections = np.loadtxt("connected_xlinksTEST2.txt", skiprows=1, delimiter="\t", dtype=int)
+connections = np.loadtxt("connected_xlinks2.txt", skiprows=1, delimiter="\t", dtype=int)
 
 connections = connections -1  # convert to 0-based indexing, with -1 for no connection
 connections = connections.astype(int)
@@ -177,18 +177,19 @@ connections = connections.astype(int)
 #        guilty = connections[i, 0]  # the first overestimated ID
 #        print(f"Found overestimated ID: {guilty} at row {i}, correcting...", flush=True)
 #        break
-gap =np.where(np.diff(connections[:,0])!=1)[0]
-guilty = connections[gap[0]+1, 0]  # the first overestimated ID
-print(f"Found overestimated ID: {guilty} at row {gap[0]+1}, correcting...", flush=True)
+if False:
+    gap =np.where(np.diff(connections[:,0])!=1)[0]
+    guilty = connections[gap[0]+1, 0]  # the first overestimated ID
+    print(f"Found overestimated ID: {guilty} at row {gap[0]+1}, correcting...", flush=True)
 
-@numba.njit
-def fix_connections(connections,guilty):
-    for i in range(len(connections)):
-        for j in range(0, connections.shape[1]):
-            if connections[i,j] >= guilty:
-                connections[i,j] -= 1
-    return connections
-connections = fix_connections(connections,guilty)
+    @numba.njit
+    def fix_connections(connections,guilty):
+        for i in range(len(connections)):
+            for j in range(0, connections.shape[1]):
+                if connections[i,j] >= guilty:
+                    connections[i,j] -= 1
+        return connections
+    connections = fix_connections(connections,guilty)
 params = {}
 with open("system.txt", "r") as f:
     for line in f:
@@ -286,8 +287,8 @@ np.savetxt(
 # ----------------------------
 # Parameters
 # ----------------------------
-total_strain = 700     # total strain (%) applied in z
-n_steps = 100          # number of increments
+total_strain = 600     # total strain (%) applied in z
+n_steps = 200          # number of increments
 dstrain = total_strain / n_steps   # strain increment per step (%)
 box_curr = box
 
@@ -342,7 +343,9 @@ for step in range(1, n_steps + 1):
                                                         log_file='broken_connections.txt')
         stress = compute_total_stress(positions, connections, box_curr,N=chainLength+1)
         stress = stress[2] - (stress[0]+stress[1])/2
-        if stress < 1e-4 or stress_total[0] > stress or 0.5*stress_total[-1] > stress:
+        if stress_total[0] > stress:
+            print("HEY I AM HERE")
+            print("")
             print("Stress has dropped to zero during relaxation, stopping deformation.", flush=True)
             checkpoint_dir = f"./output/step_final"
             os.makedirs(checkpoint_dir, exist_ok=True)

@@ -402,3 +402,17 @@ step lambda cumulative_broken remaining stress
 98 7.860000 1144 13001 0.000000
 99 7.930000 1146 12999 0.021728
 100 8.000000 1148 12997 0.021754
+step lambda cumulative_broken remaining stress
+1 1.070000 0 76050 0.000000
+step lambda cumulative_broken remaining stress
+1 1.030000 0 76050 0.000000
+step lambda cumulative_broken remaining stress
+1 1.030000 0 76050 0.000000
+step lambda cumulative_broken remaining stress
+1 1.030000 0 76050 0.000000
+step lambda cumulative_broken remaining stress
+1 1.030000 0 76050 0.000000
+step lambda cumulative_broken remaining stress
+1 1.030000 0 76050 0.000000
+step lambda cumulative_broken remaining stress
+1 1.030000 0 76050 0.000000
