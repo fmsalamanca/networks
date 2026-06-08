@@ -16,7 +16,7 @@ def func(positions, connections, box, max_steps=10000, b=np.sqrt(10), N=None, to
         indices = connections[:,0].copy()  # use xlink IDs from connections table, which are already sorted and unique
         np.random.shuffle(indices)  # shuffle in-place for random order each MCS
         #indices = np.arange(nxlink)  # from 0 to nxlink-1
-
+        
         new_positions = positions.copy()
         # main loop
         for i in indices:
@@ -83,7 +83,6 @@ def breakage_potential(positions, connections, box, U_crit,b=np.sqrt(10),N=None,
             if conn_val != -1:
             
                 conn_pos = positions[conn_val] % box
-
             # current distance under PBC
                 delta  = conn_pos - pos
                 delta  = (delta + 0.5 * box) % box - 0.5 * box
@@ -239,7 +238,7 @@ def relax_box_uniaxial(positions, connections, box, N=None):
     f_curr = (stress_curr[0]+stress_curr[1])/2 - stress_curr[2]  # target: sigma_x == sigma_y == sigma_z
 
     for _ in range(max_iter):
-        #print(f"L={L_curr:.8f}, f={f_curr:.6e}, sx={stress_curr[0]:.6e}, sy={stress_curr[1]:.6e}, sz={stress_curr[2]:.6e}")
+        print(f"L={L_curr:.8f}, f={f_curr:.6e}, sx={stress_curr[0]:.6e}, sy={stress_curr[1]:.6e}, sz={stress_curr[2]:.6e}")
         if abs(f_curr) < tol_stress:
             print("Stress difference converged with f =", f_curr,flush=True)
             return positions,stress_curr,box
@@ -270,11 +269,15 @@ def relax_box_uniaxial(positions, connections, box, N=None):
         L_prev, f_prev = L_curr, f_curr
         L_curr, f_curr = L_next, f_next
         stress_curr = stress_next
-
+        print(f"L={L_curr:.6f}, f={f_curr:.6e}, scale={scale:.6f}, "
+      f"sx={stress_curr[0]:.4e}, sy={stress_curr[1]:.4e}, sz={stress_curr[2]:.4e}")
     raise RuntimeError('Secant method did not converge')
-  
+print("")
+print(box)
 positions,stress,box = relax_box_uniaxial(positions,connections,box,N=chainLength+1)
 stress = stress[2] - (stress[0]+stress[1])/2
+print(box)
+print("")
 np.savetxt(
     "initial_equilibrated_positions.txt",
     positions,
@@ -287,7 +290,7 @@ np.savetxt(
 # ----------------------------
 # Parameters
 # ----------------------------
-total_strain = 600     # total strain (%) applied in z
+total_strain = 6000     # total strain (%) applied in z
 n_steps = 200          # number of increments
 dstrain = total_strain / n_steps   # strain increment per step (%)
 box_curr = box
@@ -296,10 +299,10 @@ N = chainLength+1
 b = np.sqrt(10)
 U_crit = (N*b)**2/(N*b**2) # in units of kT, using ideal chain model with Kuhn length b and n segments per chain
 
-connections,broken = breakage_potential(positions=positions, connections=connections, box=box_curr, U_crit=U_crit,N=chainLength+1,
-                                                        log_file='broken_connections.txt')
+if False:
+    connections,broken = breakage_potential(positions=positions, connections=connections, box=box_curr, U_crit=U_crit,N=chainLength+1,
+                                                            log_file='broken_connections.txt')
 total_initial_bonds = count_bonds(connections)
-
 os.makedirs("./output", exist_ok=True)
 
 # Store initial state for linear strain application
@@ -343,9 +346,9 @@ for step in range(1, n_steps + 1):
                                                         log_file='broken_connections.txt')
         stress = compute_total_stress(positions, connections, box_curr,N=chainLength+1)
         stress = stress[2] - (stress[0]+stress[1])/2
+        if stress < 0:
+            stress = 0
         if stress_total[0] > stress:
-            print("HEY I AM HERE")
-            print("")
             print("Stress has dropped to zero during relaxation, stopping deformation.", flush=True)
             checkpoint_dir = f"./output/step_final"
             os.makedirs(checkpoint_dir, exist_ok=True)
@@ -441,7 +444,7 @@ for step in range(1, n_steps + 1):
         f.write(f"Remaining bonds: {count_bonds(connections)}/{total_initial_bonds}\n")
 
     print(f"  [Checkpoint saved → {checkpoint_dir}]", flush=True)
-    if stress < 1e-4 or stress_total[0] > stress or 0.5*stress_total[-1] > stress:
+    if stress_total[0] > stress:
         print("Stress has dropped to zero, stopping deformation.", flush=True)
         positions = func(positions, connections,box=box_curr,N=chainLength+1)  # final relaxation
         checkpoint_dir = f"./output/step_final"
