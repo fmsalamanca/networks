@@ -3,12 +3,11 @@ import time
 from collections import defaultdict
 
 t0 = time.time()
-
 # ── 1. Parse header ──────────────────────────────────────────────────────────
 info = []
+
 with open("LastConfig2.bfm", "r") as file:
     data = file.readlines()
-
 for i, line in enumerate(data):
     if (line.startswith("!") or line.startswith("#!")) and "=" in line:
         textstring = line.strip()[1:]
