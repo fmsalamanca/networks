@@ -13,45 +13,45 @@ def func(positions, connections, box, max_steps=10000, b=np.sqrt(10), N=None, to
     while step < max_steps:
         current_energy = 0
         #indices = np.random.permutation(nxlink)  # from 0 to nxlink-1
-        indices = connections[:,0].copy()  # use xlink IDs from connections table, which are already sorted and unique
+        rows = np.arange(connections.shape[0])
+        indices = rows.copy()
         np.random.shuffle(indices)  # shuffle in-place for random order each MCS
         #indices = np.arange(nxlink)  # from 0 to nxlink-1
         
         new_positions = positions.copy()
         # main loop
-        for i in indices:
+        for row in indices:
+            i = connections[row, 0]
             pos = positions[i] # NO NEED TO APPLY PBC HERE, AS IT WILL BE DONE IN THE DELTA CALCULATION
             sum_delta = np.zeros(3, dtype=positions.dtype)
+            sum_distance_squared = 0.0
             count = 0
             
             for k in range(1,connections.shape[1]):
 
-                conn_val = connections[i,k]
-                if conn_val != -1:
+                conn_val = connections[row,k]
+                if conn_val >= 0 and conn_val < len(positions):
                     conn_pos = positions[conn_val]
                     delta = conn_pos - pos
                     delta = (delta + 0.5 * box) % box - 0.5 * box
                     sum_delta[0] += delta[0]
                     sum_delta[1] += delta[1]
                     sum_delta[2] += delta[2]
+                    sum_distance_squared += delta[0]**2 + delta[1]**2 + delta[2]**2
                     if i != conn_val:
                         count += 1
             if count == 0:
                 continue
-            if count == 1:
-                new_pos0 = positions[conn_val,0] 
-                new_pos1 = positions[conn_val,1] 
-                new_pos2 = positions[conn_val,2] 
-            else:
-                COM0 = sum_delta[0] / count
-                COM1 = sum_delta[1] / count
-                COM2 = sum_delta[2] / count
 
-                new_pos0 = (pos[0] + COM0) % box[0]
-                new_pos1 = (pos[1] + COM1) % box[1]
-                new_pos2 = (pos[2] + COM2) % box[2]
+            COM0 = sum_delta[0] / count
+            COM1 = sum_delta[1] / count
+            COM2 = sum_delta[2] / count
 
-            energy = (3/2)*(sum_delta[0]**2 + sum_delta[1]**2 + sum_delta[2]**2)/(N*b**2) # in units of kT, using ideal chain model with Kuhn length b and n segments per chain
+            new_pos0 = (pos[0] + COM0) % box[0]
+            new_pos1 = (pos[1] + COM1) % box[1]
+            new_pos2 = (pos[2] + COM2) % box[2]
+
+            energy = (3/2)*sum_distance_squared/(N*b**2) # in units of kT, using ideal chain model with Kuhn length b and n segments per chain
             
             new_positions[i, 0] = new_pos0
             new_positions[i, 1] = new_pos1
@@ -71,51 +71,47 @@ def func(positions, connections, box, max_steps=10000, b=np.sqrt(10), N=None, to
 
 def breakage_potential(positions, connections, box, U_crit,b=np.sqrt(10),N=None,log_file=None):
     broken = False
-    nxlink = len(positions)
-    #indices = np.random.permutation(nxlink)  # from 0 to nxlink-1
-    indices = connections[:,0].copy()  # use xlink IDs from connections table, which are already sorted and unique
-    np.random.shuffle(indices)  # shuffle in-place for random order each MCS
-    test=1
-    for i in indices:
+    rows = np.arange(connections.shape[0])
+    np.random.shuffle(rows)
+    for row in rows:
+        i = connections[row, 0]
+        if i < 0 or i >= len(positions):
+            continue
         pos = positions[i] % box
         for k in range(1,connections.shape[1]): # 1 is to ignore self connection
-            conn_val = connections[i,k]
-            if conn_val != -1:
-            
+            conn_val = connections[row, k]
+            if conn_val >= 0 and conn_val < len(positions) and conn_val != i:
                 conn_pos = positions[conn_val] % box
-            # current distance under PBC
                 delta  = conn_pos - pos
                 delta  = (delta + 0.5 * box) % box - 0.5 * box
                 energy = (3/2)*(delta[0]**2 + delta[1]**2 + delta[2]**2)/(N*b**2) # in units of kT, using ideal chain model with Kuhn length b and n segments per chain
                 if energy >= U_crit:
                     broken = True
-                    # Remove connection from i to conn_val
-                    connections[i, k] = -1
+                    connections[row, k] = -1
                     
-                    # Find and remove reverse connection (from conn_val to i)
-                    reverse_idx = np.where(connections[conn_val] == i)[0]
-                    if len(reverse_idx) > 0:
-                        connections[conn_val, reverse_idx[0]] = -1
-                    # Write to file in canonical form (always smaller index first)
-                    # This ensures each bond is written exactly once
-                    bond_pair = sorted([i, conn_val])
-                    with open(log_file, "a") as f:
-                        f.write(f"{bond_pair[0]} {bond_pair[1]}\n")
+                    reverse_rows = np.where(connections[:, 0] == conn_val)[0]
+                    if len(reverse_rows) > 0:
+                        reverse_row = reverse_rows[0]
+                        reverse_idx = np.where(connections[reverse_row, 1:] == i)[0]
+                        if len(reverse_idx) > 0:
+                            connections[reverse_row, reverse_idx[0] + 1] = -1
+                    if log_file is not None:
+                        bond_pair = sorted([i, conn_val])
+                        with open(log_file, "a") as f:
+                            f.write(f"{bond_pair[0]} {bond_pair[1]}\n")
     return connections, broken
 
 def compute_total_stress(positions, connections, box,N=None,b=np.sqrt(10)):
-    nxlink = len(positions)
-
-    indices = connections[:,0].copy()  # use xlink IDs from connections table, which are already sorted and unique
-    np.random.shuffle(indices)  # shuffle in-place for random order each MCS
-    #indices = np.arange(nxlink)  # from 0 to nxlink-1
     total_delta = np.zeros(3, dtype=positions.dtype)
-    for i in indices:
+    for row in range(connections.shape[0]):
+        i = connections[row, 0]
+        if i < 0 or i >= len(positions):
+            continue
         pos = positions[i]
         sum_delta = np.zeros(3, dtype=positions.dtype)
         for k in range(1,connections.shape[1]):
-            conn_val = connections[i,k]
-            if conn_val != -1:
+            conn_val = connections[row, k]
+            if conn_val >= 0 and conn_val < len(positions) and conn_val != i:
                 conn_pos = positions[conn_val]
                 delta = conn_pos - pos
                 delta = np.abs((delta + 0.5*box) % box - 0.5 * box)
@@ -128,18 +124,19 @@ def compute_total_stress(positions, connections, box,N=None,b=np.sqrt(10)):
     return stress
 
 def compute_total_force(positions, connections, box,N=None,b=np.sqrt(10)):
-    nxlink = len(positions)
-
-    indices = connections[:,0].copy()  # use xlink IDs from connections table, which are already sorted and unique
-    np.random.shuffle(indices)  # shuffle in-place for random order each MCS
+    rows = np.arange(connections.shape[0])
+    np.random.shuffle(rows)
     total_delta = np.zeros(3, dtype=positions.dtype)
-    for i in indices:
+    for row in rows:
+        i = connections[row, 0]
+        if i < 0 or i >= len(positions):
+            continue
         pos = positions[i]
 
         sum_delta = np.zeros(3, dtype=positions.dtype)
         for k in range(1, connections.shape[1]):
-            conn_val = connections[i,k]
-            if conn_val != -1:
+            conn_val = connections[row, k]
+            if conn_val >= 0 and conn_val < len(positions) and conn_val != i:
                 conn_pos = positions[conn_val]
                 delta = conn_pos - pos
                 delta = np.abs((delta + 0.5*box) % box - 0.5 * box)
@@ -164,10 +161,10 @@ def count_bonds(connections):
 ###################################################
 
 # Load crosslink positions
-positions = np.loadtxt("crosslinks-positions2.txt")
+positions = np.loadtxt("crosslinks-positions.txt")
 t0 = time()
 # Load connection table (first column = ID, next columns = connected IDs)
-connections = np.loadtxt("connected_xlinks2.txt", skiprows=1, delimiter="\t", dtype=int)
+connections = np.loadtxt("connected_xlinks.txt", skiprows=1, delimiter="\t", dtype=int)
 
 connections = connections -1  # convert to 0-based indexing, with -1 for no connection
 connections = connections.astype(int)
@@ -208,6 +205,7 @@ box = np.array([box_x, box_y, box_z], dtype=positions.dtype)
 
 L_prev = box_x
 pos_prev = func(positions, connections, box,N=chainLength+1)
+print(pos_prev)
 stress_ref = 0
 tol_stress = 1e-6
 tol_L = 1e-6
@@ -273,10 +271,10 @@ def relax_box_uniaxial(positions, connections, box, N=None):
       f"sx={stress_curr[0]:.4e}, sy={stress_curr[1]:.4e}, sz={stress_curr[2]:.4e}")
     raise RuntimeError('Secant method did not converge')
 print("")
-print(box)
+print("here is the box before relaxation: ",box)
 positions,stress,box = relax_box_uniaxial(positions,connections,box,N=chainLength+1)
 stress = stress[2] - (stress[0]+stress[1])/2
-print(box)
+print("here is the box after relaxation: ",box)
 print("")
 np.savetxt(
     "initial_equilibrated_positions.txt",
@@ -290,7 +288,7 @@ np.savetxt(
 # ----------------------------
 # Parameters
 # ----------------------------
-total_strain = 6000     # total strain (%) applied in z
+total_strain = 700     # total strain (%) applied in z
 n_steps = 200          # number of increments
 dstrain = total_strain / n_steps   # strain increment per step (%)
 box_curr = box
@@ -340,6 +338,7 @@ for step in range(1, n_steps + 1):
                                                         log_file='broken_connections.txt')
     
     # ---- 4) relax system with new bonds ----
+    stop_deformation = False
     while broken:
         positions = func(positions, connections,box=box_curr,N=chainLength+1)
         connections,broken = breakage_potential(positions=positions, connections=connections, box=box_curr, U_crit=U_crit,N=chainLength+1,
@@ -348,7 +347,7 @@ for step in range(1, n_steps + 1):
         stress = stress[2] - (stress[0]+stress[1])/2
         if stress < 0:
             stress = 0
-        if stress_total[0] > stress:
+        if stress_total[-1] > stress:
             print("Stress has dropped to zero during relaxation, stopping deformation.", flush=True)
             checkpoint_dir = f"./output/step_final"
             os.makedirs(checkpoint_dir, exist_ok=True)
@@ -387,7 +386,10 @@ for step in range(1, n_steps + 1):
                 f.write(f"Remaining bonds: {count_bonds(connections)}/{total_initial_bonds}\n")
 
             print(f"  [Checkpoint saved → {checkpoint_dir}]", flush=True)
+            stop_deformation = True
             break
+    if stop_deformation:
+        break
     with open('./output/breakage_log.txt', 'a') as f:
         if step == 1:
             f.write("step lambda cumulative_broken remaining stress\n")
@@ -398,6 +400,7 @@ for step in range(1, n_steps + 1):
     
     remaining_bonds = count_bonds(connections)
     print(f"After step {step}, remaining bonds: {remaining_bonds}/{total_initial_bonds} ({100*remaining_bonds/total_initial_bonds:.2f} %)", flush=True)
+    previous_stress = stress_total[-1]
     stress = compute_total_stress(positions, connections, box_curr,N=chainLength+1)
     stress = stress[2] - (stress[0]+stress[1])/2
 
@@ -444,7 +447,7 @@ for step in range(1, n_steps + 1):
         f.write(f"Remaining bonds: {count_bonds(connections)}/{total_initial_bonds}\n")
 
     print(f"  [Checkpoint saved → {checkpoint_dir}]", flush=True)
-    if stress_total[0] > stress:
+    if previous_stress > stress:
         print("Stress has dropped to zero, stopping deformation.", flush=True)
         positions = func(positions, connections,box=box_curr,N=chainLength+1)  # final relaxation
         checkpoint_dir = f"./output/step_final"
