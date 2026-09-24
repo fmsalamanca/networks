@@ -193,6 +193,7 @@ def func(positions, connections, box, max_steps=10000, b=np.sqrt(10), N=None, to
         current_energy += compute_lj_energy_numba(new_positions, box, LJ_SIGMA, LJ_EPSILON, LJ_CUTOFF)
 
         energy_diff = np.abs(prev_energy-current_energy)
+        print("Equilibration step:", step, "Energy difference:", energy_diff, "Current energy:", current_energy)
         if energy_diff < tolerance:
             positions = new_positions
             break
@@ -343,11 +344,10 @@ chainLength             = params["chainLength"]
 #mcs                     = params["mcs"]
 
 box = np.array([box_x, box_y, box_z], dtype=positions.dtype)
-print("here,356")
+print("Loaded input data; starting initial equilibration...", flush=True)
 
 L_prev = box_x
 pos_prev = func(positions, connections, box,N=chainLength+1)
-print(pos_prev)
 stress_ref = 0
 tol_stress = 1e-6
 tol_L = 1e-6
@@ -358,6 +358,7 @@ def relax_box_uniaxial(positions, connections, box, N=None):
     L_prev = (box[0]+box[1])/2  # using x (same as y) as the free dimension
     box[0] = box[1] = L_prev        # enforce symmetry immediately
     # Initial relaxation at current box
+    print("  Relaxing initial box...", flush=True)
     positions = func(positions, connections, box=box,N=N)
     stress_prev = compute_total_stress(positions, connections, box=box,N=N)
     f_prev = (stress_prev[0]+stress_prev[1])/2 - stress_prev[2]  # target: sigma_x == sigma_y == sigma_z
@@ -372,6 +373,7 @@ def relax_box_uniaxial(positions, connections, box, N=None):
     positions[:, 1] *= L_curr / L_prev
     box[0] = box[1] = L_curr
 
+    print("  Relaxing perturbed box...", flush=True)
     positions = func(positions, connections, box=box,N=N)
     stress_curr = compute_total_stress(positions, connections=connections, box=box,N=N)
     f_curr = (stress_curr[0]+stress_curr[1])/2 - stress_curr[2]  # target: sigma_x == sigma_y == sigma_z
@@ -401,6 +403,7 @@ def relax_box_uniaxial(positions, connections, box, N=None):
         positions[:, 1] *= scale
         box[0] = box[1] = L_next
 
+        print(f"  Relaxing box iteration {int(_) + 1}/{max_iter}...", flush=True)
         positions = func(positions, connections, box=box,N=N)
         stress_next = compute_total_stress(positions, connections=connections, box=box,N=N)
         f_next = (stress_next[0]+stress_next[1])/2 - stress_next[2]  # target: sigma_x == sigma_y == sigma_z
@@ -453,10 +456,20 @@ initial_positions = positions.copy()
 # ----------------------------
 stress_total = [stress]
 strain_total = [1]
+simulation_start = time()
+print(f"Starting deformation: {n_steps} steps, {total_strain:.1f}% total strain.", flush=True)
 for step in range(1, n_steps + 1):
     stress = 0
+    step_start = time()
+    elapsed = step_start - simulation_start
+    average_step_time = elapsed / (step - 1) if step > 1 else None
+    eta = average_step_time * (n_steps - step + 1) if average_step_time is not None else None
+    eta_text = f", ETA {eta / 60:.1f} min" if eta is not None else ""
+    print(f"[Progress] step {step}/{n_steps} ({100 * step / n_steps:.1f}%), "
+          f"strain target {step * dstrain:.2f}%{eta_text}", flush=True)
     
     if step>1:
+        print("  Equilibrating current configuration...", flush=True)
         positions = func(positions, connections,box=box_curr,N=chainLength+1)  
     # ---- 1) linear strain application ----
     # Calculate cumulative strain at this step for LINEAR growth
@@ -481,6 +494,7 @@ for step in range(1, n_steps + 1):
     # ---- 4) relax system with new bonds ----
     stop_deformation = False
     while broken:
+        print("  Relaxing after bond breakage...", flush=True)
         positions = func(positions, connections,box=box_curr,N=chainLength+1)
         connections,broken = breakage_potential(positions=positions, connections=connections, box=box_curr, U_crit=U_crit,N=chainLength+1,
                                                         log_file='broken_connections.txt')
@@ -588,6 +602,8 @@ for step in range(1, n_steps + 1):
         f.write(f"Remaining bonds: {count_bonds(connections)}/{total_initial_bonds}\n")
 
     print(f"  [Checkpoint saved → {checkpoint_dir}]", flush=True)
+    print(f"  Step completed in {(time() - step_start) / 60:.2f} min; total elapsed "
+          f"{(time() - simulation_start) / 60:.2f} min.", flush=True)
     if previous_stress > stress:
         print("Stress has dropped to zero, stopping deformation.", flush=True)
         positions = func(positions, connections,box=box_curr,N=chainLength+1)  # final relaxation
