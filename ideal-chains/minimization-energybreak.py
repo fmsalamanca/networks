@@ -4,6 +4,7 @@ import numba
 import os
 import shutil
 import random
+from matplotlib import pyplot as plt
 
 @numba.njit
 def func(positions, connections, box, max_steps=10000, b=np.sqrt(10), N=None, tolerance=1e-4):
@@ -503,8 +504,6 @@ np.savetxt(
 
 strain_total = strain_total**2-1/strain_total
 if True:
-    from matplotlib import pyplot as plt
-
     plt.plot(strain_total,stress_total)
     plt.xlabel(r"$\lambda^2-1/\lambda$")  
     plt.ylabel(r'$\sigma_z-\frac{1}{2}(\sigma_x+\sigma_y)$')
