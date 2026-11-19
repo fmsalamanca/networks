@@ -327,6 +327,12 @@ print(count_bonds(connections), "bonds in the system")
 total_strain = 700     # total strain (%) applied in z
 n_steps = 200          # number of increments
 dstrain = total_strain / n_steps   # strain increment per step (%)
+scale_2_step = min(
+    range(n_steps + 1),
+    key=lambda candidate_step: abs(1 + candidate_step * dstrain / 100 - 2.0))
+scale_3_step = min(
+    range(n_steps + 1),
+    key=lambda candidate_step: abs(1 + candidate_step * dstrain / 100 - 3.0))
 box_curr = box
 
 N = chainLength+1
@@ -347,12 +353,23 @@ initial_positions = positions.copy()
 # Incremental deformation loop
 # ----------------------------
 stress_total = [stress]
-strain_total = [1]
+scale_z = 1
+strain_total = [scale_z]
 for step in range(1, n_steps + 1):
     stress = 0
     
     if step>1:
-        positions = func(positions, connections,box=box_curr,N=chainLength+1)  
+        positions = func(positions, connections,box=box_curr,N=chainLength+1)
+
+    current_scale_step = step - 1
+    if current_scale_step == scale_2_step:
+        EY, dev, fmax, nb = young_modulus_affine(positions, connections, box_curr, N=chainLength+1, axis=2)
+        print(f"Step {current_scale_step}: E_Y near 100% deformation "
+            f"(actual {scale_z:.6f})= {EY:.6e} kT/L^3  (G = {EY/3:.6e})")
+    if current_scale_step == scale_3_step:
+        EY, dev, fmax, nb = young_modulus_affine(positions, connections, box_curr, N=chainLength+1, axis=2)
+        print(f"Step {current_scale_step}: E_Y near 200% deformation "
+            f"(actual {scale_z:.6f})= {EY:.6e} kT/L^3  (G = {EY/3:.6e})")
     # ---- 1) linear strain application ----
     # Calculate cumulative strain at this step for LINEAR growth
     cumulative_strain = step * dstrain  # %

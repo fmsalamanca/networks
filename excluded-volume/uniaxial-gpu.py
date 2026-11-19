@@ -410,16 +410,22 @@ def compute_total_force(positions, connections, box,N=None,b=np.sqrt(10)):
     return forcevector
 
 
-def count_bonds(connections):
-    bonds = set()
-    for i in range(len(connections)):
-        for k in range(connections.shape[1]):
-            conn_val = connections[i, k]
-            if conn_val != -1 and conn_val != i:  # skip invalid and self
-                # Add as sorted tuple to avoid double-counting
-                bond = tuple(sorted([i, conn_val]))
-                bonds.add(bond)
-    return len(bonds)
+def bond_entries(connections, n_positions):
+    sources = connections[:, :1]
+    neighbors = connections[:, 1:]
+    source_ids = np.broadcast_to(sources, neighbors.shape)
+    valid = (
+        (source_ids >= 0)
+        & (source_ids < n_positions)
+        & (neighbors >= 0)
+        & (neighbors < n_positions)
+        & (neighbors != source_ids)
+    )
+    return np.column_stack((source_ids[valid], neighbors[valid]))
+
+
+def count_bonds(connections, n_positions):
+    return len(bond_entries(connections, n_positions))
 
 def young_modulus_affine(positions, connections, box, N, b=np.sqrt(10), axis=2):
     """
@@ -619,7 +625,7 @@ np.savetxt(
 EY, dev, fmax, nb = young_modulus_affine(positions, connections, box, N=chainLength+1, axis=2)
 print(f"E_Y = {EY:.6e} kT/L^3  (G = {EY/3:.6e})")
 print(f"tensión desviadora = {dev:.3e}, fuerza residual máx = {fmax:.3e}, enlaces = {nb}")
-print(count_bonds(connections), "bonds in the system")
+print(count_bonds(connections, len(positions)), "bonds in the system")
 #print("strain-controlled deformation with bond breakage...")
 # ----------------------------
 # Parameters
@@ -627,6 +633,12 @@ print(count_bonds(connections), "bonds in the system")
 total_strain = 700     # total strain (%) applied in z
 n_steps = 200          # number of increments
 dstrain = total_strain / n_steps   # strain increment per step (%)
+scale_2_step = min(
+    range(n_steps + 1),
+    key=lambda candidate_step: abs(1 + candidate_step * dstrain / 100 - 2.0))
+scale_3_step = min(
+    range(n_steps + 1),
+    key=lambda candidate_step: abs(1 + candidate_step * dstrain / 100 - 3.0))
 box_curr = box
 
 N = chainLength+1
@@ -636,7 +648,7 @@ U_crit = (N*b)**2/(N*b**2) # in units of kT, using ideal chain model with Kuhn l
 if False:
     connections,broken = breakage_potential(positions=positions, connections=connections, box=box_curr, U_crit=U_crit,N=chainLength+1,
                                                             log_file=BROKEN_CONNECTIONS_LOG)
-total_initial_bonds = count_bonds(connections)
+total_initial_bonds = count_bonds(connections, len(positions))
 
 # Store initial state for linear strain application
 initial_box = box_curr.copy()
@@ -646,7 +658,8 @@ initial_positions = positions.copy()
 # Incremental deformation loop
 # ----------------------------
 stress_total = [stress]
-strain_total = [1]
+scale_z = 1
+strain_total = [scale_z]
 for step in range(1, n_steps + 1):
     stress = 0
     
@@ -654,6 +667,15 @@ for step in range(1, n_steps + 1):
         positions = func(positions, connections,box=box_curr,N=chainLength+1)  
     # ---- 1) linear strain application ----
     # Calculate cumulative strain at this step for LINEAR growth
+    current_scale_step = step - 1
+    if current_scale_step == scale_2_step:
+        EY, dev, fmax, nb = young_modulus_affine(positions, connections, box_curr, N=chainLength+1, axis=2)
+        print(f"Step {current_scale_step}: E_Y near 100% deformation "
+            f"(actual {scale_z:.6f})= {EY:.6e} kT/L^3  (G = {EY/3:.6e})")
+    if current_scale_step == scale_3_step:
+        EY, dev, fmax, nb = young_modulus_affine(positions, connections, box_curr, N=chainLength+1, axis=2)
+        print(f"Step {current_scale_step}: E_Y near 200% deformation "
+            f"(actual {scale_z:.6f})= {EY:.6e} kT/L^3  (G = {EY/3:.6e})")
     cumulative_strain = step * dstrain  # %
 
     scale_z = 1 + cumulative_strain / 100
@@ -718,7 +740,7 @@ for step in range(1, n_steps + 1):
                 f.write(f"Scale_z (lambda): {scale_z:.6f}\n")
                 f.write(f"Cumulative strain: {cumulative_strain:.4f} %\n")
                 f.write(f"Stress: {stress:.6f}\n")
-                f.write(f"Remaining bonds: {count_bonds(connections)}/{total_initial_bonds}\n")
+                f.write(f"Remaining bonds: {count_bonds(connections, len(positions))}/{total_initial_bonds}\n")
 
             print(f"  [Checkpoint saved → {checkpoint_dir}]", flush=True)
             stop_deformation = True
@@ -729,11 +751,11 @@ for step in range(1, n_steps + 1):
         if step == 1:
             f.write("step lambda cumulative_broken remaining stress\n")
         f.write(f"{step} {scale_z:.6f} "
-                f"{total_initial_bonds - count_bonds(connections)} "
-                f"{count_bonds(connections)} "
+                f"{total_initial_bonds - count_bonds(connections, len(positions))} "
+                f"{count_bonds(connections, len(positions))} "
                 f"{stress:.6f}\n")
     
-    remaining_bonds = count_bonds(connections)
+    remaining_bonds = count_bonds(connections, len(positions))
     print(f"After step {step}, remaining bonds: {remaining_bonds}/{total_initial_bonds} ({100*remaining_bonds/total_initial_bonds:.2f} %)", flush=True)
     previous_stress = stress_total[-1]
     stress = compute_total_stress(positions, connections, box_curr,N=chainLength+1)
@@ -779,7 +801,7 @@ for step in range(1, n_steps + 1):
         f.write(f"Scale_z (lambda): {scale_z:.6f}\n")
         f.write(f"Cumulative strain: {cumulative_strain:.4f} %\n")
         f.write(f"Stress: {stress:.6f}\n")
-        f.write(f"Remaining bonds: {count_bonds(connections)}/{total_initial_bonds}\n")
+        f.write(f"Remaining bonds: {count_bonds(connections, len(positions))}/{total_initial_bonds}\n")
 
     print(f"  [Checkpoint saved → {checkpoint_dir}]", flush=True)
     if previous_stress > stress:
@@ -819,7 +841,7 @@ for step in range(1, n_steps + 1):
             f.write(f"Scale_z (lambda): {scale_z:.6f}\n")
             f.write(f"Cumulative strain: {cumulative_strain:.4f} %\n")
             f.write(f"Stress: {stress:.6f}\n")
-            f.write(f"Remaining bonds: {count_bonds(connections)}/{total_initial_bonds}\n")
+            f.write(f"Remaining bonds: {count_bonds(connections, len(positions))}/{total_initial_bonds}\n")
 
         print(f"  [Checkpoint saved → {checkpoint_dir}]", flush=True)
         break
