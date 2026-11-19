@@ -1,3 +1,4 @@
 {
-    "r.lsp.promptToInstall": false
+    "r.lsp.promptToInstall": false,
+    "python.defaultInterpreterPath": "/home/fernando/projects/networks/.venv/bin/python"
 }

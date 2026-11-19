@@ -159,6 +159,40 @@ def count_bonds(connections):
                 bonds.add(bond)
     return len(bonds)
 
+def young_modulus_affine(positions, connections, box, N, b=np.sqrt(10), axis=2):
+    """
+    Módulo de Young (tracción uniaxial incompresible, F = diag(lam, lam^-1/2, lam^-1/2)
+    a lo largo de `axis`) a partir de las distancias entre partículas del estado equilibrado.
+    Unidades: kT / (unidad de longitud)^3.
+    """
+    k = 3.0 / (N * b**2)                        # E_enlace = k r^2 / 2  (en kT)
+    V = np.prod(box)
+
+    # lista de enlaces únicos (no asumo simetría ni cuento dos veces)
+    conn = connections[:, 1:]
+    ii = np.repeat(connections[:, 0], conn.shape[1])
+    jj = conn.ravel()
+    m = (jj >= 0) & (jj < len(positions)) & (jj != ii)
+    pairs = np.unique(np.sort(np.column_stack((ii[m], jj[m])), axis=1), axis=0)
+
+    # vectores de enlace con imagen mínima (igual que en func)
+    d = positions[pairs[:, 1]] - positions[pairs[:, 0]]
+    d = (d + 0.5 * box) % box - 0.5 * box
+    r2 = np.sum(d**2, axis=1)
+    dx2 = d[:, axis]**2
+    s = 2 * dx2 - (r2 - dx2)                    # 2Δ_par² − Δ_perp²
+
+    EY  = k * np.sum(r2) / V                    # d²E/dλ² / V
+    dev = 0.5 * k * np.sum(s) / V               # tensión desviadora (debe ser ~0)
+
+    # fuerza residual por partícula: k·Σ_j Δ_ij (debe ser ~0 si está equilibrado)
+    F = np.zeros_like(positions)
+    np.add.at(F, pairs[:, 0],  k * d)
+    np.add.at(F, pairs[:, 1], -k * d)
+    fmax = np.abs(F).max()
+
+    return EY, dev, fmax, len(pairs)
+
 ###################################################
 
 # Load crosslink positions
@@ -206,7 +240,7 @@ box = np.array([box_x, box_y, box_z], dtype=positions.dtype)
 
 L_prev = box_x
 pos_prev = func(positions, connections, box,N=chainLength+1)
-print(pos_prev)
+
 stress_ref = 0
 tol_stress = 1e-6
 tol_L = 1e-6
@@ -271,12 +305,9 @@ def relax_box_uniaxial(positions, connections, box, N=None):
         print(f"L={L_curr:.6f}, f={f_curr:.6e}, scale={scale:.6f}, "
       f"sx={stress_curr[0]:.4e}, sy={stress_curr[1]:.4e}, sz={stress_curr[2]:.4e}")
     raise RuntimeError('Secant method did not converge')
-print("")
-print("here is the box before relaxation: ",box)
+
 positions,stress,box = relax_box_uniaxial(positions,connections,box,N=chainLength+1)
 stress = stress[2] - (stress[0]+stress[1])/2
-print("here is the box after relaxation: ",box)
-print("")
 np.savetxt(
     "initial_equilibrated_positions.txt",
     positions,
@@ -284,40 +315,6 @@ np.savetxt(
     delimiter="\t",
     comments=''
 )
-
-def young_modulus_affine(positions, connections, box, N, b=np.sqrt(10), axis=2):
-    """
-    Módulo de Young (tracción uniaxial incompresible, F = diag(lam, lam^-1/2, lam^-1/2)
-    a lo largo de `axis`) a partir de las distancias entre partículas del estado equilibrado.
-    Unidades: kT / (unidad de longitud)^3.
-    """
-    k = 3.0 / (N * b**2)                        # E_enlace = k r^2 / 2  (en kT)
-    V = np.prod(box)
-
-    # lista de enlaces únicos (no asumo simetría ni cuento dos veces)
-    conn = connections[:, 1:]
-    ii = np.repeat(connections[:, 0], conn.shape[1])
-    jj = conn.ravel()
-    m = (jj >= 0) & (jj < len(positions)) & (jj != ii)
-    pairs = np.unique(np.sort(np.column_stack((ii[m], jj[m])), axis=1), axis=0)
-
-    # vectores de enlace con imagen mínima (igual que en func)
-    d = positions[pairs[:, 1]] - positions[pairs[:, 0]]
-    d = (d + 0.5 * box) % box - 0.5 * box
-    r2 = np.sum(d**2, axis=1)
-    dx2 = d[:, axis]**2
-    s = 2 * dx2 - (r2 - dx2)                    # 2Δ_par² − Δ_perp²
-
-    EY  = k * np.sum(r2) / V                    # d²E/dλ² / V
-    dev = 0.5 * k * np.sum(s) / V               # tensión desviadora (debe ser ~0)
-
-    # fuerza residual por partícula: k·Σ_j Δ_ij (debe ser ~0 si está equilibrado)
-    F = np.zeros_like(positions)
-    np.add.at(F, pairs[:, 0],  k * d)
-    np.add.at(F, pairs[:, 1], -k * d)
-    fmax = np.abs(F).max()
-
-    return EY, dev, fmax, len(pairs)
 
 EY, dev, fmax, nb = young_modulus_affine(positions, connections, box, N=chainLength+1, axis=2)
 print(f"E_Y = {EY:.6e} kT/L^3  (G = {EY/3:.6e})")
