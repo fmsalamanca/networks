@@ -188,9 +188,6 @@ def young_modulus_affine(positions, connections, box, N, b=np.sqrt(10), axis=2):
     s = 2 * dx2 - (r2 - dx2)                    # 2Δ_par² − Δ_perp²
 
     EY  = k * np.sum(r2) / len(d)                    # d²E/dλ² / V
-
-    f = conn.shape[1]  # número de conexiones por partícula
-    EY_Eid = f * EY / (f-2)
     
     dev = 0.5 * k * np.sum(s) / len(d)                # tensión desviadora (debe ser ~0)
 
@@ -200,7 +197,7 @@ def young_modulus_affine(positions, connections, box, N, b=np.sqrt(10), axis=2):
     np.add.at(F, pairs[:, 1], -k * d)
     fmax = np.abs(F).max()
 
-    return EY_Eid, dev, fmax, len(pairs)
+    return EY, dev, fmax, len(pairs)
 
 ###################################################
 
@@ -326,7 +323,10 @@ np.savetxt(
 )
 
 EY, dev, fmax, nb = young_modulus_affine(positions, connections, box, N=chainLength+1, axis=2)
+f = connections.shape[1]-1  # número de conexiones por partícula (first col is id)
+EYid = (f - 2) / f # Adjusted Young's modulus for ideal chains
 print(f"E_Y = {EY:.6e} kT/L^3  (G = {EY/3:.6e})")
+print(f"E_Y/E_Y(id) = {EY/EYid:.6e} (ideal chain model with f = {f})")
 print(f"tensión desviadora = {dev:.3e}, fuerza residual máx = {fmax:.3e}, enlaces = {nb}")
 print(count_bonds(connections, len(positions)), "bonds in the system")
 #print("strain-controlled deformation with bond breakage...")

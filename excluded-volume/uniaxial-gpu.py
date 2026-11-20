@@ -433,7 +433,7 @@ def young_modulus_affine(positions, connections, box, N, b=np.sqrt(10), axis=2):
     a lo largo de `axis`) a partir de las distancias entre partículas del estado equilibrado.
     Unidades: kT / (unidad de longitud)^3.
     """
-    k = 3.0 / (N * b**2)                        # E_enlace = k r^2 / 2  (en kT)
+    k = 1.0 / (N * b**2)                        # E_enlace = k r^2 / 2  (en kT)
     V = np.prod(box)
     if axis not in (0, 1, 2):
         raise ValueError("axis must be 0, 1, or 2.")
@@ -490,12 +490,8 @@ def young_modulus_affine(positions, connections, box, N, b=np.sqrt(10), axis=2):
 
     EY = k * sum_r2 / len(positions)  # d²E/dλ² / V
 
-    f = conn.shape[1]  # número de conexiones por partícula
-    print(f"Average number of connections per particle: {f}")
-    EY_Eid = f * EY / (f - 2)  # Adjusted Young's modulus for ideal chains
-
     dev = 0.5 * k * sum_s / len(positions)  # tensión desviadora (debe ser ~0)
-    return EY_Eid, dev, fmax, pair_count
+    return EY, dev, fmax, pair_count
 
 ###################################################
 
@@ -628,7 +624,10 @@ np.savetxt(
 )
 
 EY, dev, fmax, nb = young_modulus_affine(positions, connections, box, N=chainLength+1, axis=2)
+f = connections.shape[1]-1  # número de conexiones por partícula (first col is id)
+EYid = (f - 2) / f # Adjusted Young's modulus for ideal chains
 print(f"E_Y = {EY:.6e} kT/L^3  (G = {EY/3:.6e})")
+print(f"E_Y/E_Y(id) = {EY/EYid:.6e} (ideal chain model with f = {f})")
 print(f"tensión desviadora = {dev:.3e}, fuerza residual máx = {fmax:.3e}, enlaces = {nb}")
 print(count_bonds(connections, len(positions)), "bonds in the system")
 #print("strain-controlled deformation with bond breakage...")
@@ -665,52 +664,154 @@ initial_positions = positions.copy()
 stress_total = [stress]
 scale_z = 1
 strain_total = [scale_z]
-for step in range(1, n_steps + 1):
-    stress = 0
-    
-    if step>1:
-        positions = func(positions, connections,box=box_curr,N=chainLength+1)  
-    # ---- 1) linear strain application ----
-    # Calculate cumulative strain at this step for LINEAR growth
-    current_scale_step = step - 1
-    if current_scale_step == scale_2_step:
-        EY, dev, fmax, nb = young_modulus_affine(positions, connections, box_curr, N=chainLength+1, axis=2)
-        print(f"Step {current_scale_step}: E_Y near 100% deformation "
-            f"(actual {scale_z:.6f})= {EY:.6e} kT/L^3  (G = {EY/3:.6e})")
-    if current_scale_step == scale_3_step:
-        EY, dev, fmax, nb = young_modulus_affine(positions, connections, box_curr, N=chainLength+1, axis=2)
-        print(f"Step {current_scale_step}: E_Y near 200% deformation "
-            f"(actual {scale_z:.6f})= {EY:.6e} kT/L^3  (G = {EY/3:.6e})")
-    cumulative_strain = step * dstrain  # %
+if False:
+    for step in range(1, n_steps + 1):
+        stress = 0
+        
+        if step>1:
+            positions = func(positions, connections,box=box_curr,N=chainLength+1)  
+        # ---- 1) linear strain application ----
+        # Calculate cumulative strain at this step for LINEAR growth
+        current_scale_step = step - 1
+        if current_scale_step == scale_2_step:
+            EY, dev, fmax, nb = young_modulus_affine(positions, connections, box_curr, N=chainLength+1, axis=2)
+            print(f"Step {current_scale_step}: E_Y near 100% deformation "
+                f"(actual {scale_z:.6f})= {EY:.6e} kT/L^3  (G = {EY/3:.6e})")
+        if current_scale_step == scale_3_step:
+            EY, dev, fmax, nb = young_modulus_affine(positions, connections, box_curr, N=chainLength+1, axis=2)
+            print(f"Step {current_scale_step}: E_Y near 200% deformation "
+                f"(actual {scale_z:.6f})= {EY:.6e} kT/L^3  (G = {EY/3:.6e})")
+        cumulative_strain = step * dstrain  # %
 
-    scale_z = 1 + cumulative_strain / 100
-    scale_x = np.sqrt(1/scale_z)
-    scale_y = np.sqrt(1/scale_z)
+        scale_z = 1 + cumulative_strain / 100
+        scale_x = np.sqrt(1/scale_z)
+        scale_y = np.sqrt(1/scale_z)
 
-    # Update box linearly from initial state (not compounded)
-    box_new = initial_box * np.array([scale_x, scale_y, scale_z])
-    box_ratio = box_new / box_curr
-    box_curr = box_new
-    # ---- 2) rescale positions linearly from initial state ----
-    positions = positions * box_ratio
+        # Update box linearly from initial state (not compounded)
+        box_new = initial_box * np.array([scale_x, scale_y, scale_z])
+        box_ratio = box_new / box_curr
+        box_curr = box_new
+        # ---- 2) rescale positions linearly from initial state ----
+        positions = positions * box_ratio
 
 
-    # ---- 3) bond breakage ----
-    connections,broken = breakage_potential(positions=positions, connections=connections, box=box_curr, U_crit=U_crit,N=chainLength+1,
-                                                        log_file=BROKEN_CONNECTIONS_LOG)
-    
-    # ---- 4) relax system with new bonds ----
-    stop_deformation = False
-    while broken:
-        positions = func(positions, connections,box=box_curr,N=chainLength+1)
+        # ---- 3) bond breakage ----
         connections,broken = breakage_potential(positions=positions, connections=connections, box=box_curr, U_crit=U_crit,N=chainLength+1,
-                                                        log_file=BROKEN_CONNECTIONS_LOG)
+                                                            log_file=BROKEN_CONNECTIONS_LOG)
+        
+        # ---- 4) relax system with new bonds ----
+        stop_deformation = False
+        while broken:
+            positions = func(positions, connections,box=box_curr,N=chainLength+1)
+            connections,broken = breakage_potential(positions=positions, connections=connections, box=box_curr, U_crit=U_crit,N=chainLength+1,
+                                                            log_file=BROKEN_CONNECTIONS_LOG)
+            stress = compute_total_stress(positions, connections, box_curr,N=chainLength+1)
+            stress = stress[2] - (stress[0]+stress[1])/2
+            if stress < 0:
+                stress = 0
+            if stress_total[-1] > stress:
+                print("Stress has dropped to zero during relaxation, stopping deformation.", flush=True)
+                checkpoint_dir = os.path.join(OUTPUT_DIR, "step_final")
+                os.makedirs(checkpoint_dir, exist_ok=True)
+
+                np.savetxt(
+                    os.path.join(checkpoint_dir, "positions.txt"),
+                    positions,
+                    fmt=["%.4f", "%.4f", "%.4f"],
+                    delimiter="\t",
+                    comments=''
+                )
+                np.savetxt(
+                    os.path.join(checkpoint_dir, "connections.txt"),
+                    connections,
+                    fmt='%d',
+                    delimiter="\t",
+                    comments=''
+                )
+                np.savetxt(
+                    os.path.join(checkpoint_dir, "box.txt"),
+                    box_curr,
+                    fmt='%.6f',
+                    delimiter="\t",
+                    comments=''
+                )
+
+                if os.path.exists(BROKEN_CONNECTIONS_LOG):
+                        shutil.copy(BROKEN_CONNECTIONS_LOG,
+                                    os.path.join(checkpoint_dir, "broken_connections.txt"))
+
+                with open(os.path.join(checkpoint_dir, "summary.txt"), "w") as f:
+                    f.write(f"Step: {step}\n")
+                    f.write(f"Scale_z (lambda): {scale_z:.6f}\n")
+                    f.write(f"Cumulative strain: {cumulative_strain:.4f} %\n")
+                    f.write(f"Stress: {stress:.6f}\n")
+                    f.write(f"Remaining bonds: {count_bonds(connections, len(positions))}/{total_initial_bonds}\n")
+
+                print(f"  [Checkpoint saved → {checkpoint_dir}]", flush=True)
+                stop_deformation = True
+                break
+        if stop_deformation:
+            break
+        with open(os.path.join(OUTPUT_DIR, "breakage_log.txt"), 'a') as f:
+            if step == 1:
+                f.write("step lambda cumulative_broken remaining stress\n")
+            f.write(f"{step} {scale_z:.6f} "
+                    f"{total_initial_bonds - count_bonds(connections, len(positions))} "
+                    f"{count_bonds(connections, len(positions))} "
+                    f"{stress:.6f}\n")
+        
+        remaining_bonds = count_bonds(connections, len(positions))
+        print(f"After step {step}, remaining bonds: {remaining_bonds}/{total_initial_bonds} ({100*remaining_bonds/total_initial_bonds:.2f} %)", flush=True)
+        previous_stress = stress_total[-1]
         stress = compute_total_stress(positions, connections, box_curr,N=chainLength+1)
         stress = stress[2] - (stress[0]+stress[1])/2
-        if stress < 0:
-            stress = 0
-        if stress_total[-1] > stress:
-            print("Stress has dropped to zero during relaxation, stopping deformation.", flush=True)
+
+        stress_total.append(stress)
+        strain_total.append(scale_z)
+        print("Total stress = ", np.round(stress,4), 'with','lambda', '=', np.round(scale_z,2), flush=True)
+        print('', flush=True)
+        # ---- 5) checkpoint saving ----
+        
+        checkpoint_dir = os.path.join(OUTPUT_DIR, f"step_{step:04d}")
+        os.makedirs(checkpoint_dir, exist_ok=True)
+
+        np.savetxt(
+                os.path.join(checkpoint_dir, "positions.txt"),
+                positions,
+                fmt=["%.4f", "%.4f", "%.4f"],
+                delimiter="\t",
+                comments=''
+            )
+        np.savetxt(
+                os.path.join(checkpoint_dir, "connections.txt"),
+                connections,
+                fmt='%d',
+                delimiter="\t",
+                comments=''
+            )
+        np.savetxt(
+                os.path.join(checkpoint_dir, "box.txt"),
+                box_curr,
+                fmt='%.6f',
+                delimiter="\t",
+                comments=''
+            )
+
+        if os.path.exists(BROKEN_CONNECTIONS_LOG):
+                shutil.copy(BROKEN_CONNECTIONS_LOG,
+                            os.path.join(checkpoint_dir, "broken_connections.txt"))
+
+        with open(os.path.join(checkpoint_dir, "summary.txt"), "w") as f:
+            f.write(f"Step: {step}\n")
+            f.write(f"Scale_z (lambda): {scale_z:.6f}\n")
+            f.write(f"Cumulative strain: {cumulative_strain:.4f} %\n")
+            f.write(f"Stress: {stress:.6f}\n")
+            f.write(f"Remaining bonds: {count_bonds(connections, len(positions))}/{total_initial_bonds}\n")
+
+        print(f"  [Checkpoint saved → {checkpoint_dir}]", flush=True)
+        if previous_stress > stress:
+            print("Stress has dropped to zero, stopping deformation.", flush=True)
+            positions = func(positions, connections,box=box_curr,N=chainLength+1)  # final relaxation
             checkpoint_dir = os.path.join(OUTPUT_DIR, "step_final")
             os.makedirs(checkpoint_dir, exist_ok=True)
 
@@ -748,157 +849,56 @@ for step in range(1, n_steps + 1):
                 f.write(f"Remaining bonds: {count_bonds(connections, len(positions))}/{total_initial_bonds}\n")
 
             print(f"  [Checkpoint saved → {checkpoint_dir}]", flush=True)
-            stop_deformation = True
             break
-    if stop_deformation:
-        break
-    with open(os.path.join(OUTPUT_DIR, "breakage_log.txt"), 'a') as f:
-        if step == 1:
-            f.write("step lambda cumulative_broken remaining stress\n")
-        f.write(f"{step} {scale_z:.6f} "
-                f"{total_initial_bonds - count_bonds(connections, len(positions))} "
-                f"{count_bonds(connections, len(positions))} "
-                f"{stress:.6f}\n")
-    
-    remaining_bonds = count_bonds(connections, len(positions))
-    print(f"After step {step}, remaining bonds: {remaining_bonds}/{total_initial_bonds} ({100*remaining_bonds/total_initial_bonds:.2f} %)", flush=True)
-    previous_stress = stress_total[-1]
-    stress = compute_total_stress(positions, connections, box_curr,N=chainLength+1)
-    stress = stress[2] - (stress[0]+stress[1])/2
 
-    stress_total.append(stress)
-    strain_total.append(scale_z)
-    print("Total stress = ", np.round(stress,4), 'with','lambda', '=', np.round(scale_z,2), flush=True)
-    print('', flush=True)
-    # ---- 5) checkpoint saving ----
-    
-    checkpoint_dir = os.path.join(OUTPUT_DIR, f"step_{step:04d}")
-    os.makedirs(checkpoint_dir, exist_ok=True)
+
+    strain_total = np.array(strain_total)
 
     np.savetxt(
-            os.path.join(checkpoint_dir, "positions.txt"),
-            positions,
-            fmt=["%.4f", "%.4f", "%.4f"],
-            delimiter="\t",
-            comments=''
-        )
+        os.path.join(OUTPUT_DIR, "stress_strain.txt"),
+        np.column_stack((strain_total, stress_total)),
+        fmt=['%.6f', '%.6f'],
+        delimiter="\t",
+        header="Lambda\tStress",
+        comments=''
+    )
+
+    strain_total = strain_total**2-1/strain_total
+    if True:
+        plt.plot(strain_total,stress_total)
+        plt.xlabel(r"$\lambda^2-1/\lambda$")  
+        plt.ylabel(r'$\sigma_z-\frac{1}{2}(\sigma_x+\sigma_y)$')
+        plt.title(r'$(Nb)^2/(Nb^2) = $' + str(np.round(U_crit,0)))
+        plt.xlim(left=0)
+        plt.ylim(bottom=0)
+        #plt.show()
+        plt.savefig(os.path.join(OUTPUT_DIR, "Stress-Strain.png"))
+
+
+
     np.savetxt(
-            os.path.join(checkpoint_dir, "connections.txt"),
-            connections,
-            fmt='%d',
-            delimiter="\t",
-            comments=''
-        )
+        os.path.join(OUTPUT_DIR, "remaining_connections.txt"),
+        connections,
+        fmt='%d',
+        delimiter="\t",
+        comments=''
+    )
+
     np.savetxt(
-            os.path.join(checkpoint_dir, "box.txt"),
-            box_curr,
-            fmt='%.6f',
-            delimiter="\t",
-            comments=''
-        )
+        os.path.join(OUTPUT_DIR, "final_equilibrated_positions.txt"),
+        positions,
+        fmt=["%.4f", "%.4f", "%.4f"],
+        delimiter="\t",
+        comments=''
+    )
 
-    if os.path.exists(BROKEN_CONNECTIONS_LOG):
-            shutil.copy(BROKEN_CONNECTIONS_LOG,
-                        os.path.join(checkpoint_dir, "broken_connections.txt"))
-
-    with open(os.path.join(checkpoint_dir, "summary.txt"), "w") as f:
-        f.write(f"Step: {step}\n")
-        f.write(f"Scale_z (lambda): {scale_z:.6f}\n")
-        f.write(f"Cumulative strain: {cumulative_strain:.4f} %\n")
-        f.write(f"Stress: {stress:.6f}\n")
-        f.write(f"Remaining bonds: {count_bonds(connections, len(positions))}/{total_initial_bonds}\n")
-
-    print(f"  [Checkpoint saved → {checkpoint_dir}]", flush=True)
-    if previous_stress > stress:
-        print("Stress has dropped to zero, stopping deformation.", flush=True)
-        positions = func(positions, connections,box=box_curr,N=chainLength+1)  # final relaxation
-        checkpoint_dir = os.path.join(OUTPUT_DIR, "step_final")
-        os.makedirs(checkpoint_dir, exist_ok=True)
-
-        np.savetxt(
-            os.path.join(checkpoint_dir, "positions.txt"),
-            positions,
-            fmt=["%.4f", "%.4f", "%.4f"],
-            delimiter="\t",
-            comments=''
-        )
-        np.savetxt(
-            os.path.join(checkpoint_dir, "connections.txt"),
-            connections,
-            fmt='%d',
-            delimiter="\t",
-            comments=''
-        )
-        np.savetxt(
-            os.path.join(checkpoint_dir, "box.txt"),
-            box_curr,
-            fmt='%.6f',
-            delimiter="\t",
-            comments=''
-        )
-
-        if os.path.exists(BROKEN_CONNECTIONS_LOG):
-                shutil.copy(BROKEN_CONNECTIONS_LOG,
-                            os.path.join(checkpoint_dir, "broken_connections.txt"))
-
-        with open(os.path.join(checkpoint_dir, "summary.txt"), "w") as f:
-            f.write(f"Step: {step}\n")
-            f.write(f"Scale_z (lambda): {scale_z:.6f}\n")
-            f.write(f"Cumulative strain: {cumulative_strain:.4f} %\n")
-            f.write(f"Stress: {stress:.6f}\n")
-            f.write(f"Remaining bonds: {count_bonds(connections, len(positions))}/{total_initial_bonds}\n")
-
-        print(f"  [Checkpoint saved → {checkpoint_dir}]", flush=True)
-        break
-
-
-strain_total = np.array(strain_total)
-
-np.savetxt(
-    os.path.join(OUTPUT_DIR, "stress_strain.txt"),
-    np.column_stack((strain_total, stress_total)),
-    fmt=['%.6f', '%.6f'],
-    delimiter="\t",
-    header="Lambda\tStress",
-    comments=''
-)
-
-strain_total = strain_total**2-1/strain_total
-if True:
-    plt.plot(strain_total,stress_total)
-    plt.xlabel(r"$\lambda^2-1/\lambda$")  
-    plt.ylabel(r'$\sigma_z-\frac{1}{2}(\sigma_x+\sigma_y)$')
-    plt.title(r'$(Nb)^2/(Nb^2) = $' + str(np.round(U_crit,0)))
-    plt.xlim(left=0)
-    plt.ylim(bottom=0)
-    #plt.show()
-    plt.savefig(os.path.join(OUTPUT_DIR, "Stress-Strain.png"))
-
-
-
-np.savetxt(
-    os.path.join(OUTPUT_DIR, "remaining_connections.txt"),
-    connections,
-    fmt='%d',
-    delimiter="\t",
-    comments=''
-)
-
-np.savetxt(
-    os.path.join(OUTPUT_DIR, "final_equilibrated_positions.txt"),
-    positions,
-    fmt=["%.4f", "%.4f", "%.4f"],
-    delimiter="\t",
-    comments=''
-)
-
-np.savetxt(
-    os.path.join(OUTPUT_DIR, "box_curr.txt"),
-    box_curr,
-    fmt='%d',
-    delimiter="\t",
-    comments=''
-)
+    np.savetxt(
+        os.path.join(OUTPUT_DIR, "box_curr.txt"),
+        box_curr,
+        fmt='%d',
+        delimiter="\t",
+        comments=''
+    )
 
 print(f"Finished in {(time() - t0)/60:.2f} minutes.", flush=True)
 
