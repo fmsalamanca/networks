@@ -148,16 +148,22 @@ def compute_total_force(positions, connections, box,N=None,b=np.sqrt(10)):
     return forcevector
 
 
-def count_bonds(connections):
-    bonds = set()
-    for i in range(len(connections)):
-        for k in range(connections.shape[1]):
-            conn_val = connections[i, k]
-            if conn_val != -1 and conn_val != i:  # skip invalid and self
-                # Add as sorted tuple to avoid double-counting
-                bond = tuple(sorted([i, conn_val]))
-                bonds.add(bond)
-    return len(bonds)
+def bond_entries(connections, n_positions=None):
+    sources = connections[:, :1]
+    neighbors = connections[:, 1:]
+    source_ids = np.broadcast_to(sources, neighbors.shape)
+    valid = (
+        (source_ids >= 0)
+        & (neighbors >= 0)
+        & (neighbors != source_ids)
+    )
+    if n_positions is not None:
+        valid &= (source_ids < n_positions) & (neighbors < n_positions)
+    return np.column_stack((source_ids[valid], neighbors[valid]))
+
+
+def count_bonds(connections, n_positions=None):
+    return len(bond_entries(connections, n_positions))
 
 def young_modulus_affine(positions, connections, box, N, b=np.sqrt(10), axis=2):
     """
@@ -166,7 +172,6 @@ def young_modulus_affine(positions, connections, box, N, b=np.sqrt(10), axis=2):
     Unidades: kT / (unidad de longitud)^3.
     """
     k = 3.0 / (N * b**2)                        # E_enlace = k r^2 / 2  (en kT)
-    V = np.prod(box)
 
     # lista de enlaces únicos (no asumo simetría ni cuento dos veces)
     conn = connections[:, 1:]
@@ -182,8 +187,12 @@ def young_modulus_affine(positions, connections, box, N, b=np.sqrt(10), axis=2):
     dx2 = d[:, axis]**2
     s = 2 * dx2 - (r2 - dx2)                    # 2Δ_par² − Δ_perp²
 
-    EY  = k * np.sum(r2) / V                    # d²E/dλ² / V
-    dev = 0.5 * k * np.sum(s) / V               # tensión desviadora (debe ser ~0)
+    EY  = k * np.sum(r2) / len(d)                    # d²E/dλ² / V
+
+    f = conn.shape[1]  # número de conexiones por partícula
+    EY_Eid = f * EY / (f-2)
+    
+    dev = 0.5 * k * np.sum(s) / len(d)                # tensión desviadora (debe ser ~0)
 
     # fuerza residual por partícula: k·Σ_j Δ_ij (debe ser ~0 si está equilibrado)
     F = np.zeros_like(positions)
@@ -191,7 +200,7 @@ def young_modulus_affine(positions, connections, box, N, b=np.sqrt(10), axis=2):
     np.add.at(F, pairs[:, 1], -k * d)
     fmax = np.abs(F).max()
 
-    return EY, dev, fmax, len(pairs)
+    return EY_Eid, dev, fmax, len(pairs)
 
 ###################################################
 
@@ -319,7 +328,7 @@ np.savetxt(
 EY, dev, fmax, nb = young_modulus_affine(positions, connections, box, N=chainLength+1, axis=2)
 print(f"E_Y = {EY:.6e} kT/L^3  (G = {EY/3:.6e})")
 print(f"tensión desviadora = {dev:.3e}, fuerza residual máx = {fmax:.3e}, enlaces = {nb}")
-print(count_bonds(connections), "bonds in the system")
+print(count_bonds(connections, len(positions)), "bonds in the system")
 #print("strain-controlled deformation with bond breakage...")
 # ----------------------------
 # Parameters
@@ -342,7 +351,7 @@ U_crit = (N*b)**2/(N*b**2) # in units of kT, using ideal chain model with Kuhn l
 if False:
     connections,broken = breakage_potential(positions=positions, connections=connections, box=box_curr, U_crit=U_crit,N=chainLength+1,
                                                             log_file='broken_connections.txt')
-total_initial_bonds = count_bonds(connections)
+total_initial_bonds = count_bonds(connections, len(positions))
 os.makedirs("./output", exist_ok=True)
 
 # Store initial state for linear strain application
@@ -436,7 +445,7 @@ for step in range(1, n_steps + 1):
                 f.write(f"Scale_z (lambda): {scale_z:.6f}\n")
                 f.write(f"Cumulative strain: {cumulative_strain:.4f} %\n")
                 f.write(f"Stress: {stress:.6f}\n")
-                f.write(f"Remaining bonds: {count_bonds(connections)}/{total_initial_bonds}\n")
+                f.write(f"Remaining bonds: {count_bonds(connections, len(positions))}/{total_initial_bonds}\n")
 
             print(f"  [Checkpoint saved → {checkpoint_dir}]", flush=True)
             stop_deformation = True
@@ -447,11 +456,11 @@ for step in range(1, n_steps + 1):
         if step == 1:
             f.write("step lambda cumulative_broken remaining stress\n")
         f.write(f"{step} {scale_z:.6f} "
-                f"{total_initial_bonds - count_bonds(connections)} "
-                f"{count_bonds(connections)} "
+                f"{total_initial_bonds - count_bonds(connections, len(positions))} "
+                f"{count_bonds(connections, len(positions))} "
                 f"{stress:.6f}\n")
     
-    remaining_bonds = count_bonds(connections)
+    remaining_bonds = count_bonds(connections, len(positions))
     print(f"After step {step}, remaining bonds: {remaining_bonds}/{total_initial_bonds} ({100*remaining_bonds/total_initial_bonds:.2f} %)", flush=True)
     previous_stress = stress_total[-1]
     stress = compute_total_stress(positions, connections, box_curr,N=chainLength+1)
@@ -497,7 +506,7 @@ for step in range(1, n_steps + 1):
         f.write(f"Scale_z (lambda): {scale_z:.6f}\n")
         f.write(f"Cumulative strain: {cumulative_strain:.4f} %\n")
         f.write(f"Stress: {stress:.6f}\n")
-        f.write(f"Remaining bonds: {count_bonds(connections)}/{total_initial_bonds}\n")
+        f.write(f"Remaining bonds: {count_bonds(connections, len(positions))}/{total_initial_bonds}\n")
 
     print(f"  [Checkpoint saved → {checkpoint_dir}]", flush=True)
     if previous_stress > stress:
@@ -537,7 +546,7 @@ for step in range(1, n_steps + 1):
             f.write(f"Scale_z (lambda): {scale_z:.6f}\n")
             f.write(f"Cumulative strain: {cumulative_strain:.4f} %\n")
             f.write(f"Stress: {stress:.6f}\n")
-            f.write(f"Remaining bonds: {count_bonds(connections)}/{total_initial_bonds}\n")
+            f.write(f"Remaining bonds: {count_bonds(connections, len(positions))}/{total_initial_bonds}\n")
 
         print(f"  [Checkpoint saved → {checkpoint_dir}]", flush=True)
         break

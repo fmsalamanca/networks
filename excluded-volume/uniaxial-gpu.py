@@ -488,9 +488,14 @@ def young_modulus_affine(positions, connections, box, N, b=np.sqrt(10), axis=2):
     )
     sum_r2, sum_s, fmax = totals.copy_to_host()
 
-    EY = k * sum_r2 / V
-    dev = 0.5 * k * sum_s / V
-    return EY, dev, fmax, pair_count
+    EY = k * sum_r2 / len(positions)  # d²E/dλ² / V
+
+    f = conn.shape[1]  # número de conexiones por partícula
+    print(f"Average number of connections per particle: {f}")
+    EY_Eid = f * EY / (f - 2)  # Adjusted Young's modulus for ideal chains
+
+    dev = 0.5 * k * sum_s / len(positions)  # tensión desviadora (debe ser ~0)
+    return EY_Eid, dev, fmax, pair_count
 
 ###################################################
 
