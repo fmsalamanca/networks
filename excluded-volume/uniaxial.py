@@ -53,7 +53,7 @@ def func(positions, connections, box, max_steps=10000, b=np.sqrt(10), N=None, to
             new_pos2 = (pos[2] + COM2) % box[2]
 
             energy = (3/2)*sum_distance_squared/(N*b**2) # in units of kT, using ideal chain model with Kuhn length b and n segments per chain
-            
+            #energy = sum_distance_squared
             new_positions[i, 0] = new_pos0
             new_positions[i, 1] = new_pos1
             new_positions[i, 2] = new_pos2
@@ -171,7 +171,7 @@ def young_modulus_affine(positions, connections, box, N, b=np.sqrt(10), axis=2):
     a lo largo de `axis`) a partir de las distancias entre partículas del estado equilibrado.
     Unidades: kT / (unidad de longitud)^3.
     """
-    k = 3.0 / (N * b**2)                        # E_enlace = k r^2 / 2  (en kT)
+    k = 1.0 / (N * b**2)                        # E_enlace = k r^2 / 2  (en kT)
 
     # lista de enlaces únicos (no asumo simetría ni cuento dos veces)
     conn = connections[:, 1:]

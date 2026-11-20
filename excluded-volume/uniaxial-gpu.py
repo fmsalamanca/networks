@@ -634,7 +634,7 @@ print(count_bonds(connections, len(positions)), "bonds in the system")
 # ----------------------------
 # Parameters
 # ----------------------------
-total_strain = 700     # total strain (%) applied in z
+total_strain = 120     # total strain (%) applied in z
 n_steps = 200          # number of increments
 dstrain = total_strain / n_steps   # strain increment per step (%)
 scale_2_step = min(
@@ -664,7 +664,7 @@ initial_positions = positions.copy()
 stress_total = [stress]
 scale_z = 1
 strain_total = [scale_z]
-if False:
+if True:
     for step in range(1, n_steps + 1):
         stress = 0
         
