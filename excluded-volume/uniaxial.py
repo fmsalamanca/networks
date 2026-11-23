@@ -6,6 +6,10 @@ import shutil
 import random
 from matplotlib import pyplot as plt
 
+CHAIN_EDGE_FILE = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "ideal-chains", "crosslink_chain_edges.txt")
+)
+
 @numba.njit
 def func(positions, connections, box, max_steps=10000, b=np.sqrt(10), N=None, tolerance=1e-4, energy_output=None):
     nxlink = len(positions)
@@ -321,23 +325,53 @@ positions,stress,box = relax_box_uniaxial(positions,connections,box,N=chainLengt
 os.makedirs("./output", exist_ok=True)
 if len(energy_history) > 0:
     plt.figure()
-    plt.plot(energy_steps, energy_history)
-    plt.xlabel("func() step")
-    plt.ylabel("Current energy")
-    plt.savefig("./output/energy_vs_func_step.png")
+    plt.plot(np.log(energy_steps), energy_history)
+    plt.xlabel("log(MCS)")
+    plt.ylabel("Total energy (kT)")
+    plt.savefig("./output/energy_vs_logmcs.png")
     plt.close()
 
-bond_pairs = bond_entries(connections, len(positions))
-bond_pairs = bond_pairs[bond_pairs[:, 0] < bond_pairs[:, 1]]
+chain_edge_map = np.genfromtxt(CHAIN_EDGE_FILE, delimiter="\t", names=True, dtype=int)
+if (
+    chain_edge_map.dtype.names is None
+    or not {"chainID", "xlinkA", "xlinkB"}.issubset(chain_edge_map.dtype.names)
+):
+    raise ValueError(f"{CHAIN_EDGE_FILE} must contain chainID, xlinkA, and xlinkB columns.")
+chain_edge_map = np.atleast_1d(chain_edge_map)
+chain_ids = chain_edge_map["chainID"]
+xlink_a = chain_edge_map["xlinkA"]
+xlink_b = chain_edge_map["xlinkB"]
+if np.any(chain_ids < 1) or np.any(xlink_a < 0) or np.any(xlink_b < 0):
+    raise ValueError(f"{CHAIN_EDGE_FILE} contains invalid chain or crosslink IDs.")
+
+has_both_crosslinks = (xlink_a > 0) & (xlink_b > 0)
+chain_pairs = np.column_stack(
+    (xlink_a[has_both_crosslinks], xlink_b[has_both_crosslinks])
+)
+connection_pairs = bond_entries(connections, len(positions))
+connection_pairs = connection_pairs[connection_pairs[:, 0] < connection_pairs[:, 1]] + 1
+chain_order = np.lexsort((chain_pairs[:, 1], chain_pairs[:, 0]))
+connection_order = np.lexsort((connection_pairs[:, 1], connection_pairs[:, 0]))
+if not np.array_equal(
+    chain_pairs[chain_order], connection_pairs[connection_order]
+):
+    raise ValueError("Chain edge mapping does not match connected_xlinks.txt.")
+if np.any(chain_pairs > len(positions)):
+    raise ValueError("Chain edge mapping contains crosslink IDs outside the positions table.")
+
+bond_lengths = np.zeros(len(chain_ids), dtype=np.float64)
+bond_pairs = np.column_stack(
+    (xlink_a[has_both_crosslinks] - 1, xlink_b[has_both_crosslinks] - 1)
+)
 bond_delta = positions[bond_pairs[:, 1]] - positions[bond_pairs[:, 0]]
 bond_delta = (bond_delta + 0.5 * box) % box - 0.5 * box
-bond_lengths = np.linalg.norm(bond_delta, axis=1)
-bond_ids = np.arange(1, len(bond_lengths) + 1)
+bond_lengths[has_both_crosslinks] = np.linalg.norm(bond_delta, axis=1)
 np.savetxt(
     "./output/chain_bond_lengths.txt",
-    np.column_stack((bond_ids, bond_lengths)),
-    fmt=["%d", "%.8f"],
+    np.column_stack((chain_ids, xlink_a, xlink_b, bond_lengths)),
+    fmt=["%d", "%d", "%d", "%.8f"],
     delimiter="\t",
+    header="chainID\txlinkA\txlinkB\tbondLength",
     comments="",
 )
 
@@ -361,7 +395,7 @@ print(count_bonds(connections, len(positions)), "bonds in the system")
 # ----------------------------
 # Parameters
 # ----------------------------
-total_strain = 700     # total strain (%) applied in z
+total_strain = 120     # total strain (%) applied in z
 n_steps = 200          # number of increments
 dstrain = total_strain / n_steps   # strain increment per step (%)
 scale_2_step = min(

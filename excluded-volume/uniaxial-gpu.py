@@ -500,9 +500,9 @@ def young_modulus_affine(positions, connections, box, N, b=np.sqrt(10), axis=2):
     )
     sum_r2, sum_s, fmax = totals.copy_to_host()
 
-    EY = k * sum_r2 / len(positions)  # d²E/dλ² / V
+    EY = k * sum_r2 / pair_count  # d²E/dλ² / V
 
-    dev = 0.5 * k * sum_s / len(positions)  # tensión desviadora (debe ser ~0)
+    dev = 0.5 * k * sum_s / pair_count  # tensión desviadora (debe ser ~0)
     return EY, dev, fmax, pair_count
 
 ###################################################
