@@ -10,6 +10,9 @@ from matplotlib import pyplot as plt
 
 OUTPUT_DIR = "output-gpu"
 BROKEN_CONNECTIONS_LOG = os.path.join(OUTPUT_DIR, "broken_connections.txt")
+energy_history = []
+energy_steps = []
+energy_recorded = False
 
 
 @cuda.jit
@@ -289,6 +292,9 @@ def _compute_total_delta_gpu(positions, connections, box):
 
 
 def func(positions, connections, box, max_steps=10000, b=np.sqrt(10), N=None, tolerance=1e-4):
+    global energy_recorded
+    record_energy = not energy_recorded
+    energy_recorded = True
     if connections.shape[0] == 0:
         return positions.copy()
     if N is None:
@@ -317,6 +323,9 @@ def func(positions, connections, box, max_steps=10000, b=np.sqrt(10), N=None, to
             row_energies, total_energy, connections.shape[0]
         )
         current_energy = total_energy.copy_to_host()[0]
+        if record_energy:
+            energy_steps.append(step + 1)
+            energy_history.append(current_energy)
 
         energy_diff = np.abs(prev_energy-current_energy)
         device_positions, next_positions = next_positions, device_positions
@@ -614,6 +623,28 @@ def relax_box_uniaxial(positions, connections, box, N=None):
     raise RuntimeError('Secant method did not converge')
 
 positions,stress,box = relax_box_uniaxial(positions,connections,box,N=chainLength+1)
+if energy_history:
+    plt.figure()
+    plt.plot(np.log(energy_steps), energy_history)
+    plt.xlabel("log(MCS)")
+    plt.ylabel("Total energy (kT)")
+    plt.savefig(os.path.join(OUTPUT_DIR, "energy_vs_logmcs.png"))
+    plt.close()
+
+bond_pairs = bond_entries(connections, len(positions))
+bond_pairs = bond_pairs[bond_pairs[:, 0] < bond_pairs[:, 1]]
+bond_delta = positions[bond_pairs[:, 1]] - positions[bond_pairs[:, 0]]
+bond_delta -= box * np.floor(bond_delta / box + 0.5)
+bond_lengths = np.linalg.norm(bond_delta, axis=1)
+bond_ids = np.arange(1, len(bond_lengths) + 1)
+np.savetxt(
+    os.path.join(OUTPUT_DIR, "chain_bond_lengths.txt"),
+    np.column_stack((bond_ids, bond_lengths)),
+    fmt=["%d", "%.8f"],
+    delimiter="\t",
+    comments="",
+)
+
 stress = stress[2] - (stress[0]+stress[1])/2
 np.savetxt(
     os.path.join(OUTPUT_DIR, "initial_equilibrated_positions.txt"),
@@ -664,7 +695,7 @@ initial_positions = positions.copy()
 stress_total = [stress]
 scale_z = 1
 strain_total = [scale_z]
-if True:
+if False:
     for step in range(1, n_steps + 1):
         stress = 0
         

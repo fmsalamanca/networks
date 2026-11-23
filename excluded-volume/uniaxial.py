@@ -7,7 +7,7 @@ import random
 from matplotlib import pyplot as plt
 
 @numba.njit
-def func(positions, connections, box, max_steps=10000, b=np.sqrt(10), N=None, tolerance=1e-4):
+def func(positions, connections, box, max_steps=10000, b=np.sqrt(10), N=None, tolerance=1e-4, energy_output=None):
     nxlink = len(positions)
     step = 0
     prev_energy = np.inf
@@ -60,6 +60,8 @@ def func(positions, connections, box, max_steps=10000, b=np.sqrt(10), N=None, to
             current_energy += energy
 
         energy_diff = np.abs(prev_energy-current_energy)
+        if energy_output is not None:
+            energy_output[step] = current_energy
         if energy_diff < tolerance:
             positions = new_positions
             break
@@ -245,7 +247,10 @@ chainLength             = params["chainLength"]
 box = np.array([box_x, box_y, box_z], dtype=positions.dtype)
 
 L_prev = box_x
-pos_prev = func(positions, connections, box,N=chainLength+1)
+first_call_energy = np.full(10000, np.nan, dtype=np.float64)
+pos_prev = func(positions, connections, box, N=chainLength+1, energy_output=first_call_energy)
+energy_history = first_call_energy[~np.isnan(first_call_energy)]
+energy_steps = np.flatnonzero(~np.isnan(first_call_energy)) + 1
 
 stress_ref = 0
 tol_stress = 1e-6
@@ -313,6 +318,29 @@ def relax_box_uniaxial(positions, connections, box, N=None):
     raise RuntimeError('Secant method did not converge')
 
 positions,stress,box = relax_box_uniaxial(positions,connections,box,N=chainLength+1)
+os.makedirs("./output", exist_ok=True)
+if len(energy_history) > 0:
+    plt.figure()
+    plt.plot(energy_steps, energy_history)
+    plt.xlabel("func() step")
+    plt.ylabel("Current energy")
+    plt.savefig("./output/energy_vs_func_step.png")
+    plt.close()
+
+bond_pairs = bond_entries(connections, len(positions))
+bond_pairs = bond_pairs[bond_pairs[:, 0] < bond_pairs[:, 1]]
+bond_delta = positions[bond_pairs[:, 1]] - positions[bond_pairs[:, 0]]
+bond_delta = (bond_delta + 0.5 * box) % box - 0.5 * box
+bond_lengths = np.linalg.norm(bond_delta, axis=1)
+bond_ids = np.arange(1, len(bond_lengths) + 1)
+np.savetxt(
+    "./output/chain_bond_lengths.txt",
+    np.column_stack((bond_ids, bond_lengths)),
+    fmt=["%d", "%.8f"],
+    delimiter="\t",
+    comments="",
+)
+
 stress = stress[2] - (stress[0]+stress[1])/2
 np.savetxt(
     "initial_equilibrated_positions.txt",
@@ -352,7 +380,6 @@ if False:
     connections,broken = breakage_potential(positions=positions, connections=connections, box=box_curr, U_crit=U_crit,N=chainLength+1,
                                                             log_file='broken_connections.txt')
 total_initial_bonds = count_bonds(connections, len(positions))
-os.makedirs("./output", exist_ok=True)
 
 # Store initial state for linear strain application
 initial_box = box_curr.copy()
