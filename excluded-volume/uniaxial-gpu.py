@@ -10,6 +10,9 @@ from matplotlib import pyplot as plt
 
 OUTPUT_DIR = "output-gpu"
 BROKEN_CONNECTIONS_LOG = os.path.join(OUTPUT_DIR, "broken_connections.txt")
+CHAIN_EDGE_FILE = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "ideal-chains", "crosslink_chain_edges.txt")
+)
 energy_history = []
 energy_steps = []
 energy_recorded = False
@@ -631,28 +634,54 @@ if energy_history:
     plt.savefig(os.path.join(OUTPUT_DIR, "energy_vs_logmcs.png"))
     plt.close()
 
-bond_pairs = bond_entries(connections, len(positions))
-bond_pairs = bond_pairs[bond_pairs[:, 0] < bond_pairs[:, 1]]
+chain_edge_map = np.genfromtxt(CHAIN_EDGE_FILE, delimiter="\t", names=True, dtype=int)
+if (
+    chain_edge_map.dtype.names is None
+    or not {"chainID", "xlinkA", "xlinkB"}.issubset(chain_edge_map.dtype.names)
+):
+    raise ValueError(f"{CHAIN_EDGE_FILE} must contain chainID, xlinkA, and xlinkB columns.")
+chain_edge_map = np.atleast_1d(chain_edge_map)
+chain_ids = chain_edge_map["chainID"]
+xlink_a = chain_edge_map["xlinkA"]
+xlink_b = chain_edge_map["xlinkB"]
+if np.any(chain_ids < 1) or np.any(xlink_a < 0) or np.any(xlink_b < 0):
+    raise ValueError(f"{CHAIN_EDGE_FILE} contains invalid chain or crosslink IDs.")
+
+has_both_crosslinks = (xlink_a > 0) & (xlink_b > 0)
+chain_pairs = np.column_stack(
+    (xlink_a[has_both_crosslinks], xlink_b[has_both_crosslinks])
+)
+connection_pairs = bond_entries(connections, len(positions))
+connection_pairs = connection_pairs[connection_pairs[:, 0] < connection_pairs[:, 1]] + 1
+chain_order = np.lexsort((chain_pairs[:, 1], chain_pairs[:, 0]))
+connection_order = np.lexsort((connection_pairs[:, 1], connection_pairs[:, 0]))
+if not np.array_equal(
+    chain_pairs[chain_order], connection_pairs[connection_order]
+):
+    raise ValueError("Chain edge mapping does not match connected_xlinks.txt.")
+if np.any(chain_pairs > len(positions)):
+    raise ValueError("Chain edge mapping contains crosslink IDs outside the positions table.")
+
+bond_lengths = np.zeros(len(chain_ids), dtype=np.float64)
+bond_pairs = np.column_stack(
+    (xlink_a[has_both_crosslinks] - 1, xlink_b[has_both_crosslinks] - 1)
+)
 bond_delta = positions[bond_pairs[:, 1]] - positions[bond_pairs[:, 0]]
 bond_delta -= box * np.floor(bond_delta / box + 0.5)
-bond_lengths = np.linalg.norm(bond_delta, axis=1)
-bond_ids = np.arange(1, len(bond_lengths) + 1)
+bond_lengths[has_both_crosslinks] = np.linalg.norm(bond_delta, axis=1)
 np.savetxt(
     os.path.join(OUTPUT_DIR, "chain_bond_lengths.txt"),
-    np.column_stack((bond_ids, bond_lengths)),
-    fmt=["%d", "%.8f"],
+    np.column_stack((chain_ids, xlink_a, xlink_b, bond_lengths)),
+    fmt=["%d", "%d", "%d", "%.8f"],
     delimiter="\t",
-    comments="",
-)
+    header="chainID\txlinkA\txlinkB\tbondLength")
 
 stress = stress[2] - (stress[0]+stress[1])/2
 np.savetxt(
     os.path.join(OUTPUT_DIR, "initial_equilibrated_positions.txt"),
     positions,
     fmt=["%.4f", "%.4f", "%.4f"],
-    delimiter="\t",
-    comments=''
-)
+    delimiter="\t")
 
 EY, dev, fmax, nb = young_modulus_affine(positions, connections, box, N=chainLength+1, axis=2)
 f = connections.shape[1]-1  # número de conexiones por partícula (first col is id)
