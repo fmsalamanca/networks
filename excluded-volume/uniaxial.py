@@ -6,8 +6,17 @@ import shutil
 import random
 from matplotlib import pyplot as plt
 
-CHAIN_EDGE_FILE = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", "ideal-chains", "crosslink_chain_edges.txt")
+BFM_DATA_DIR = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "ideal-chains")
+)
+POSITIONS_FILE = "crosslinks-positions.txt"
+CONNECTIONS_FILE = "connected_xlinks.txt"
+SYSTEM_FILE = "system.txt"
+BFM_DISTANCE_TABLE_FILE = os.path.join(
+    BFM_DATA_DIR, "crosslink_squared_distances_from_bfm.txt"
+)
+BFM_CHAIN_EDGE_FILE = os.path.join(
+    BFM_DATA_DIR, "crosslink_chain_edges_from_bfm.txt"
 )
 
 @numba.njit
@@ -207,14 +216,11 @@ def young_modulus_affine(positions, connections, box, N, b=np.sqrt(10), axis=2):
 
 ###################################################
 
-# Load crosslink positions
-positions = np.loadtxt("crosslinks-positions.txt")
 t0 = time()
 # Load connection table (first column = ID, next columns = connected IDs)
-connections = np.loadtxt("connected_xlinks.txt", skiprows=1, delimiter="\t", dtype=int)
-
-connections = connections -1  # convert to 0-based indexing, with -1 for no connection
-connections = connections.astype(int)
+connections = np.loadtxt(
+    CONNECTIONS_FILE, skiprows=1, delimiter="\t", dtype=int
+) - 1
 #for i in range(1, len(connections)):
 #    if connections[i, 0] != connections[i-1, 0] + 1:
 #        guilty = connections[i, 0]  # the first overestimated ID
@@ -234,7 +240,7 @@ if False:
         return connections
     connections = fix_connections(connections,guilty)
 params = {}
-with open("system.txt", "r") as f:
+with open(SYSTEM_FILE, "r") as f:
     for line in f:
         key, value = line.strip().split(" = ")
         params[key] = float(value)
@@ -248,7 +254,133 @@ number_of_crosslinkers  = params["number_of_crosslinkers"]
 chainLength             = params["chainLength"]
 #mcs                     = params["mcs"]
 
+all_positions = np.loadtxt(POSITIONS_FILE, skiprows=1, delimiter="\t")
+expected_position_rows = int(number_of_linear_chains + number_of_crosslinkers)
+if len(all_positions) != expected_position_rows:
+    raise ValueError(
+        f"{POSITIONS_FILE} contains {len(all_positions)} rows; "
+        f"expected {expected_position_rows} chain and crosslink positions."
+    )
+crosslink_position_start = len(all_positions) - int(number_of_crosslinkers)
+positions = all_positions[crosslink_position_start:]
+if np.any(connections[:, 0] < 0) or np.any(connections[:, 0] >= len(positions)):
+    raise ValueError("Connection row IDs must refer to valid crosslink positions.")
+
 box = np.array([box_x, box_y, box_z], dtype=positions.dtype)
+periodic = np.array(
+    [bool(params.get(f"periodic_{axis}", 1)) for axis in ("x", "y", "z")]
+)
+
+distance_table = np.genfromtxt(
+    BFM_DISTANCE_TABLE_FILE,
+    delimiter="\t",
+    names=True,
+    dtype=None,
+    encoding="utf-8",
+)
+distance_table = np.atleast_1d(distance_table)
+required_distance_columns = {
+    "xlinkID_BFM",
+    "connectedXlinkID_BFM",
+    "squaredDistance",
+    "chainID",
+}
+if (
+    distance_table.dtype.names is None
+    or not required_distance_columns.issubset(distance_table.dtype.names)
+):
+    raise ValueError(
+        f"{BFM_DISTANCE_TABLE_FILE} must contain "
+        "xlinkID_BFM, connectedXlinkID_BFM, squaredDistance, and chainID columns."
+    )
+
+xlink_a_bfm = distance_table["xlinkID_BFM"].astype(int)
+xlink_b_bfm = distance_table["connectedXlinkID_BFM"].astype(int)
+distance_chain_ids = distance_table["chainID"].astype(int)
+reference_squared_distances = distance_table["squaredDistance"].astype(float)
+xlink_bfm_offset = int(chainLength * number_of_linear_chains)
+xlink_a = xlink_a_bfm - xlink_bfm_offset
+xlink_b = xlink_b_bfm - xlink_bfm_offset
+if (
+    np.any(distance_chain_ids < 1)
+    or np.any(distance_chain_ids > number_of_linear_chains)
+    or np.any(xlink_a < 1)
+    or np.any(xlink_a > len(positions))
+    or np.any(xlink_b < 1)
+    or np.any(xlink_b > len(positions))
+    or np.any(~np.isfinite(reference_squared_distances))
+    or np.any(reference_squared_distances < 0)
+):
+    raise ValueError(f"{BFM_DISTANCE_TABLE_FILE} contains invalid IDs or distances.")
+
+initial_delta = positions[xlink_b - 1] - positions[xlink_a - 1]
+initial_delta[:, periodic] -= box[periodic] * np.floor(
+    initial_delta[:, periodic] / box[periodic] + 0.5
+)
+computed_squared_distances = np.einsum("ij,ij->i", initial_delta, initial_delta)
+if not np.allclose(
+    computed_squared_distances, reference_squared_distances, rtol=0, atol=1e-8
+):
+    raise ValueError(
+        f"{BFM_DISTANCE_TABLE_FILE} squared distances do not match "
+        f"{POSITIONS_FILE}."
+    )
+
+chain_edge_map = np.genfromtxt(
+    BFM_CHAIN_EDGE_FILE,
+    delimiter="\t",
+    names=True,
+    dtype=None,
+    encoding="utf-8",
+)
+chain_edge_map = np.atleast_1d(chain_edge_map)
+required_chain_edge_columns = {"chainID", "xlinkA", "xlinkB"}
+if (
+    chain_edge_map.dtype.names is None
+    or not required_chain_edge_columns.issubset(chain_edge_map.dtype.names)
+):
+    raise ValueError(
+        f"{BFM_CHAIN_EDGE_FILE} must contain chainID, xlinkA, and xlinkB columns."
+    )
+
+chain_ids = chain_edge_map["chainID"].astype(int)
+chain_xlink_a = chain_edge_map["xlinkA"].astype(int)
+chain_xlink_b = chain_edge_map["xlinkB"].astype(int)
+if (
+    len(chain_ids) != int(number_of_linear_chains)
+    or not np.array_equal(
+        np.sort(chain_ids), np.arange(1, int(number_of_linear_chains) + 1)
+    )
+    or np.any(chain_xlink_a < 0)
+    or np.any(chain_xlink_a > len(positions))
+    or np.any(chain_xlink_b < 0)
+    or np.any(chain_xlink_b > len(positions))
+    or np.any((chain_xlink_a == 0) & (chain_xlink_b > 0))
+):
+    raise ValueError(f"{BFM_CHAIN_EDGE_FILE} contains invalid or incomplete chain rows.")
+
+has_chain_pair = (chain_xlink_a > 0) & (chain_xlink_b > 0)
+distance_edge_rows = np.column_stack((distance_chain_ids, xlink_a, xlink_b))
+chain_edge_rows = np.column_stack(
+    (
+        chain_ids[has_chain_pair],
+        chain_xlink_a[has_chain_pair],
+        chain_xlink_b[has_chain_pair],
+    )
+)
+distance_edge_order = np.lexsort(
+    (distance_edge_rows[:, 2], distance_edge_rows[:, 1], distance_edge_rows[:, 0])
+)
+chain_edge_order = np.lexsort(
+    (chain_edge_rows[:, 2], chain_edge_rows[:, 1], chain_edge_rows[:, 0])
+)
+if not np.array_equal(
+    distance_edge_rows[distance_edge_order],
+    chain_edge_rows[chain_edge_order],
+):
+    raise ValueError(
+        f"{BFM_CHAIN_EDGE_FILE} does not match {BFM_DISTANCE_TABLE_FILE}."
+    )
 
 L_prev = box_x
 first_call_energy = np.full(10000, np.nan, dtype=np.float64)
@@ -331,47 +463,54 @@ if len(energy_history) > 0:
     plt.savefig("./output/energy_vs_logmcs.png")
     plt.close()
 
-chain_edge_map = np.genfromtxt(CHAIN_EDGE_FILE, delimiter="\t", names=True, dtype=int)
-if (
-    chain_edge_map.dtype.names is None
-    or not {"chainID", "xlinkA", "xlinkB"}.issubset(chain_edge_map.dtype.names)
-):
-    raise ValueError(f"{CHAIN_EDGE_FILE} must contain chainID, xlinkA, and xlinkB columns.")
-chain_edge_map = np.atleast_1d(chain_edge_map)
-chain_ids = chain_edge_map["chainID"]
-xlink_a = chain_edge_map["xlinkA"]
-xlink_b = chain_edge_map["xlinkB"]
-if np.any(chain_ids < 1) or np.any(xlink_a < 0) or np.any(xlink_b < 0):
-    raise ValueError(f"{CHAIN_EDGE_FILE} contains invalid chain or crosslink IDs.")
-
-has_both_crosslinks = (xlink_a > 0) & (xlink_b > 0)
-chain_pairs = np.column_stack(
-    (xlink_a[has_both_crosslinks], xlink_b[has_both_crosslinks])
-)
 connection_pairs = bond_entries(connections, len(positions))
 connection_pairs = connection_pairs[connection_pairs[:, 0] < connection_pairs[:, 1]] + 1
+has_distinct_crosslinks = xlink_a != xlink_b
+chain_pairs = np.column_stack(
+    (xlink_a[has_distinct_crosslinks], xlink_b[has_distinct_crosslinks])
+)
 chain_order = np.lexsort((chain_pairs[:, 1], chain_pairs[:, 0]))
 connection_order = np.lexsort((connection_pairs[:, 1], connection_pairs[:, 0]))
 if not np.array_equal(
     chain_pairs[chain_order], connection_pairs[connection_order]
 ):
-    raise ValueError("Chain edge mapping does not match connected_xlinks.txt.")
-if np.any(chain_pairs > len(positions)):
-    raise ValueError("Chain edge mapping contains crosslink IDs outside the positions table.")
+    raise ValueError("BFM distance table does not match the non-self connection table.")
 
-bond_lengths = np.zeros(len(chain_ids), dtype=np.float64)
-bond_pairs = np.column_stack(
-    (xlink_a[has_both_crosslinks] - 1, xlink_b[has_both_crosslinks] - 1)
+connection_self_entries = np.count_nonzero(connections[:, 1:] == connections[:, :1])
+distance_table_self_edges = np.count_nonzero(~has_distinct_crosslinks)
+if (
+    connection_self_entries % 2 != 0
+    or connection_self_entries // 2 != distance_table_self_edges
+):
+    raise ValueError(
+        "BFM distance table does not match self-connections in the connection table."
+    )
+
+bond_lengths_squared = np.zeros(len(chain_ids), dtype=np.float64)
+bond_delta = positions[chain_xlink_b[has_chain_pair] - 1] - positions[
+    chain_xlink_a[has_chain_pair] - 1
+]
+bond_delta[:, periodic] -= box[periodic] * np.floor(
+    bond_delta[:, periodic] / box[periodic] + 0.5
 )
-bond_delta = positions[bond_pairs[:, 1]] - positions[bond_pairs[:, 0]]
-bond_delta = (bond_delta + 0.5 * box) % box - 0.5 * box
-bond_lengths[has_both_crosslinks] = np.linalg.norm(bond_delta, axis=1)
+bond_lengths_squared[has_chain_pair] = np.einsum(
+    "ij,ij->i", bond_delta, bond_delta
+)
+chain_xlink_a_bfm = np.where(
+    chain_xlink_a > 0, xlink_bfm_offset + chain_xlink_a, 0
+)
+chain_xlink_b_bfm = np.where(
+    chain_xlink_b > 0, xlink_bfm_offset + chain_xlink_b, 0
+)
+bond_length_order = np.argsort(chain_ids)
 np.savetxt(
     "./output/chain_bond_lengths.txt",
-    np.column_stack((chain_ids, xlink_a, xlink_b, bond_lengths)),
+    np.column_stack(
+        (chain_ids, chain_xlink_a_bfm, chain_xlink_b_bfm, bond_lengths_squared)
+    )[bond_length_order],
     fmt=["%d", "%d", "%d", "%.8f"],
     delimiter="\t",
-    header="chainID\txlinkA\txlinkB\tbondLength",
+    header="chainID\txlinkA\txlinkB\tbondLength**2",
     comments="",
 )
 

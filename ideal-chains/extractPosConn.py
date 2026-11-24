@@ -174,4 +174,23 @@ crosslinks = "".join(data[info[13][2] + 1 + int(info[8][1]):])
 crosslinks = np.fromstring(crosslinks, sep=" ", dtype=float).reshape(-1, 3)
 np.savetxt("crosslinks-positions.txt", crosslinks, fmt="%.0f")
 
+bond_lengths = np.zeros(len(chain_edge_rows), dtype=float)
+has_both_crosslinks = (chain_edge_rows[:, 1] > 0) & (chain_edge_rows[:, 2] > 0)
+bond_pairs = chain_edge_rows[has_both_crosslinks, 1:3] - 1
+bond_delta = crosslinks[bond_pairs[:, 1]] - crosslinks[bond_pairs[:, 0]]
+box = np.array([box_x, box_y, box_z])
+bond_delta -= box * np.floor(bond_delta / box + 0.5)
+bond_lengths[has_both_crosslinks] = np.linalg.norm(bond_delta, axis=1)
+bond_length_order = np.lexsort(
+    (chain_edge_rows[:, 2], chain_edge_rows[:, 1], chain_edge_rows[:, 0])
+)
+np.savetxt(
+    "chain_bond_lengths.txt",
+    np.column_stack((chain_edge_rows, bond_lengths))[bond_length_order],
+    fmt=["%d", "%d", "%d", "%.8f"],
+    delimiter="\t",
+    header="chainID\txlinkA\txlinkB\tbondLength",
+    comments="",
+)
+
 print(f"Execution time: {time.time() - t0:.2f} seconds")
