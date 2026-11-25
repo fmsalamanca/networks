@@ -21,20 +21,16 @@ BFM_CHAIN_EDGE_FILE = os.path.join(
 
 @numba.njit
 def func(positions, connections, box, max_steps=10000, b=np.sqrt(10), N=None, tolerance=1e-4, energy_output=None):
-    nxlink = len(positions)
     step = 0
     prev_energy = np.inf
     while step < max_steps:
         current_energy = 0
-        #indices = np.random.permutation(nxlink)  # from 0 to nxlink-1
-        rows = np.arange(connections.shape[0])
-        indices = rows.copy()
-        np.random.shuffle(indices)  # shuffle in-place for random order each MCS
-        #indices = np.arange(nxlink)  # from 0 to nxlink-1
+        row_order = np.arange(connections.shape[0])
+        np.random.shuffle(row_order)
         
         new_positions = positions.copy()
-        # main loop
-        for row in indices:
+        for row in row_order:
+            # The shuffled row is only a schedule slot; its source ID indexes positions.
             i = connections[row, 0]
             pos = positions[i] # NO NEED TO APPLY PBC HERE, AS IT WILL BE DONE IN THE DELTA CALCULATION
             sum_delta = np.zeros(3, dtype=positions.dtype)
@@ -265,6 +261,12 @@ crosslink_position_start = len(all_positions) - int(number_of_crosslinkers)
 positions = all_positions[crosslink_position_start:]
 if np.any(connections[:, 0] < 0) or np.any(connections[:, 0] >= len(positions)):
     raise ValueError("Connection row IDs must refer to valid crosslink positions.")
+if connections.shape[0] != len(positions) or not np.array_equal(
+    np.sort(connections[:, 0]), np.arange(len(positions))
+):
+    raise ValueError(
+        "CPU relaxation requires exactly one connection row for every crosslink position."
+    )
 
 box = np.array([box_x, box_y, box_z], dtype=positions.dtype)
 periodic = np.array(

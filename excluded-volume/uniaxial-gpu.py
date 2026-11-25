@@ -26,11 +26,15 @@ energy_recorded = False
 
 
 @cuda.jit
-def _relax_step_kernel(positions, connections, box, N, b, new_positions, row_energies):
-    row = cuda.grid(1)
-    if row >= connections.shape[0]:
+def _relax_step_kernel(
+    positions, connections, row_order, box, N, b, new_positions, row_energies
+):
+    row_slot = cuda.grid(1)
+    if row_slot >= row_order.shape[0]:
         return
 
+    # Map the randomized execution slot back to its original connection row.
+    row = row_order[row_slot]
     row_energies[row] = 0.0
     i = connections[row, 0]
     pos0 = positions[i, 0]
@@ -319,6 +323,7 @@ def func(positions, connections, box, max_steps=10000, b=np.sqrt(10), N=None, to
     device_connections = cuda.to_device(connections)
     device_box = cuda.to_device(box)
     next_positions = cuda.device_array_like(device_positions)
+    device_row_order = cuda.device_array(connections.shape[0], dtype=np.int32)
     row_energies = cuda.device_array(connections.shape[0], dtype=np.float64)
     total_energy = cuda.device_array(1, dtype=np.float64)
 
@@ -326,8 +331,18 @@ def func(positions, connections, box, max_steps=10000, b=np.sqrt(10), N=None, to
     prev_energy = np.inf
     while step < max_steps:
         next_positions.copy_to_device(device_positions)
+        # Visit every cross-link row once per Monte Carlo step in random order.
+        row_order = np.random.permutation(connections.shape[0]).astype(np.int32)
+        device_row_order.copy_to_device(row_order)
         _relax_step_kernel[blocks, threads_per_block](
-            device_positions, device_connections, device_box, N, b, next_positions, row_energies
+            device_positions,
+            device_connections,
+            device_row_order,
+            device_box,
+            N,
+            b,
+            next_positions,
+            row_energies,
         )
         _reduce_energy_kernel[1, threads_per_block](
             row_energies, total_energy, connections.shape[0]
@@ -552,8 +567,12 @@ connections = np.loadtxt(
 connections = connections - 1  # Convert IDs to 0-based; empty slots become -1.
 if np.any(connections[:, 0] < 0) or np.any(connections[:, 0] >= len(positions)):
     raise ValueError("Connection row IDs must refer to valid crosslink positions.")
-if np.unique(connections[:, 0]).size != connections.shape[0]:
-    raise ValueError("GPU relaxation requires unique connection row IDs to avoid concurrent writes.")
+if connections.shape[0] != len(positions) or not np.array_equal(
+    np.sort(connections[:, 0]), np.arange(len(positions))
+):
+    raise ValueError(
+        "GPU relaxation requires exactly one connection row for every crosslink position."
+    )
 if not cuda.is_available():
     raise RuntimeError("CUDA is unavailable. Install a CUDA-enabled Numba environment and verify the NVIDIA driver.")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
