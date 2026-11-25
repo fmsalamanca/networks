@@ -1,196 +1,329 @@
-import numpy as np
+import re
+import sys
 import time
 from collections import Counter
+from pathlib import Path
 
-t0 = time.time()
+import numpy as np
 
-# ── 1. Parse header ──────────────────────────────────────────────────────────
-info = []
 
-with open("LastConfig2.bfm", "r") as file:
-    data = file.readlines()
-for i, line in enumerate(data):
-    if (line.startswith("!") or line.startswith("#!")) and "=" in line:
-        textstring = line.strip().lstrip("#!")   # strips both '!' and '#!' cleanly
-        name, raw_value = textstring.split("=", 1)
-        try:
-            value = float(raw_value)
-        except ValueError:
+OUTPUT_DIR = Path(__file__).resolve().parent
+
+
+def get_bfm_file():
+    if len(sys.argv) > 1:
+        return Path(sys.argv[1]).resolve()
+
+    for name in ("LastConfig2.bfm", "LastConfig.bfm"):
+        candidate = OUTPUT_DIR / name
+        if candidate.exists():
+            return candidate
+    raise FileNotFoundError(
+        "Could not find LastConfig2.bfm or LastConfig.bfm next to this script."
+    )
+
+HEADER_RE = re.compile(r"^#?!\s*([^=]+?)\s*=\s*(.*?)\s*$")
+BOND_RE = re.compile(r"^\s*(\d+)\s+(\d+)")
+NUMBER_RE = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?"
+POSITION_RE = re.compile(rf"^\s*({NUMBER_RE})\s+({NUMBER_RE})\s+({NUMBER_RE})")
+
+
+def read_bfm_file(path):
+    metadata = []
+    bond_rows = []
+    position_rows = []
+    reading_bonds = False
+    reading_positions = False
+    found_bonds = False
+    found_positions = False
+
+    with path.open(encoding="latin-1") as source:
+        for line_number, line in enumerate(source, start=1):
+            if reading_positions:
+                if not line.strip():
+                    continue
+                match = POSITION_RE.match(line)
+                if match is None:
+                    raise ValueError(
+                        f"Could not read three coordinates on line {line_number}."
+                    )
+                position_rows.append(tuple(float(value) for value in match.groups()))
+                continue
+
+            header_match = HEADER_RE.match(line)
+            if header_match:
+                key, value = header_match.groups()
+                key = key.strip()
+                metadata.append((key, value.strip()))
+                if key == "box_x" and reading_bonds:
+                    reading_bonds = False
+                if key == "mcs":
+                    reading_positions = True
+                    found_positions = True
+                continue
+
+            if line.strip() == "!bonds":
+                reading_bonds = True
+                found_bonds = True
+                continue
+
+            if reading_bonds and line.strip():
+                match = BOND_RE.match(line)
+                if match is None:
+                    raise ValueError(
+                        f"Could not read a bond pair on line {line_number}."
+                    )
+                bond_rows.append(tuple(int(value) for value in match.groups()))
+
+    if not found_bonds:
+        raise ValueError(f"No !bonds section found in {path}.")
+    if not found_positions:
+        raise ValueError(f"No !mcs position section found in {path}.")
+
+    return (
+        dict(metadata),
+        np.asarray(bond_rows, dtype=int).reshape(-1, 2),
+        np.asarray(position_rows, dtype=float).reshape(-1, 3),
+    )
+
+
+def write_extracted_tables(
+    metadata_rows,
+    metadata,
+    bonds,
+    positions,
+    output_dir,
+    output_suffix="",
+):
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    def suffixed(name):
+        stem, dot, extension = name.rpartition(".")
+        if dot:
+            return f"{stem}{output_suffix}.{extension}"
+        return f"{stem}{output_suffix}"
+
+    with (output_dir / suffixed("system.txt")).open("w") as output:
+        for key, value in metadata_rows:
+            output.write(f"{key} = {value}\n")
+
+    np.savetxt(
+        output_dir / suffixed("bonds.txt"),
+        bonds,
+        fmt="%d",
+        delimiter="\t",
+        header="monomerA\tmonomerB",
+        comments="",
+    )
+    np.savetxt(
+        output_dir / suffixed("positions.txt"),
+        positions,
+        fmt="%.8g",
+        delimiter="\t",
+        header="x\ty\tz",
+        comments="",
+    )
+
+    number_of_monomers = int(float(metadata["number_of_monomers"]))
+    number_of_linear_chains = int(float(metadata["number_of_linear_chains"]))
+    number_of_crosslinkers = int(float(metadata["number_of_crosslinkers"]))
+    chain_length = int(float(metadata["chainLength"]))
+    expected_position_rows = number_of_linear_chains + number_of_crosslinkers
+    if len(positions) != expected_position_rows:
+        raise ValueError(
+            f"Found {len(positions)} position rows; expected "
+            f"{number_of_linear_chains} chain positions plus "
+            f"{number_of_crosslinkers} crosslink positions."
+        )
+
+    box = np.array(
+        [float(metadata[f"box_{axis}"]) for axis in ("x", "y", "z")]
+    )
+    periodic = np.array(
+        [bool(int(float(metadata[f"periodic_{axis}"]))) for axis in ("x", "y", "z")]
+    )
+    if np.any(periodic & (box <= 0)):
+        raise ValueError("Periodic box dimensions must be positive.")
+
+    if np.any(bonds < 1) or np.any(bonds > number_of_monomers):
+        raise ValueError("The bond section contains monomer IDs outside the declared range.")
+
+    ordered_bonds = np.sort(bonds, axis=1)
+    chain_monomers = ordered_bonds[:, 0]
+    crosslinker_globals = ordered_bonds[:, 1]
+    chain_ids = (chain_monomers - 1) // chain_length + 1
+    crosslinker_ids = crosslinker_globals - chain_length * number_of_linear_chains
+    if np.any((chain_ids < 1) | (chain_ids > number_of_linear_chains)):
+        raise ValueError("Bond data contains an invalid linear-chain ID.")
+    if np.any((crosslinker_ids < 1) | (crosslinker_ids > number_of_crosslinkers)):
+        raise ValueError("Bond data contains an invalid crosslinker ID.")
+
+    chain_attachments = [[] for _ in range(number_of_linear_chains + 1)]
+    for monomer_id, chain_id, crosslinker_id in zip(
+        chain_monomers, chain_ids, crosslinker_ids
+    ):
+        chain_attachments[chain_id].append(
+            (int(monomer_id), int(crosslinker_id))
+        )
+    chains = [
+        [chain_id]
+        + sorted(crosslinker_id for _, crosslinker_id in chain_attachments[chain_id])
+        for chain_id in range(1, number_of_linear_chains + 1)
+    ]
+
+    max_crosslinkers = max(len(row) - 1 for row in chains)
+    padded_chains = [
+        row + [0] * (max_crosslinkers - len(row) + 1)
+        for row in chains
+    ]
+    chain_header = "\t".join(
+        ["chainID"] + [f"xlink_{index + 1}" for index in range(max_crosslinkers)]
+    )
+    np.savetxt(
+        output_dir / suffixed("chain_xlinks.txt"),
+        np.asarray(padded_chains, dtype=int),
+        fmt="%d",
+        delimiter="\t",
+        header=chain_header,
+        comments="",
+    )
+
+    connections = {crosslinker_id: [] for crosslinker_id in range(1, number_of_crosslinkers + 1)}
+    pair_counts = Counter()
+    chain_edge_rows = []
+    for chain_id in range(1, number_of_linear_chains + 1):
+        attachments = chain_attachments[chain_id]
+        matched_pairs = []
+        for left in range(len(attachments)):
+            monomer_a, source_xlink = attachments[left]
+            for right in range(left + 1, len(attachments)):
+                monomer_b, target_xlink = attachments[right]
+                if abs(monomer_b - monomer_a) != chain_length - 1:
+                    continue
+                matched_pairs.append(tuple(sorted((source_xlink, target_xlink))))
+
+        if not matched_pairs:
+            attached_xlinks = chains[chain_id - 1][1:]
+            chain_edge_rows.append(
+                [chain_id, attached_xlinks[0] if len(attachments) == 1 else 0, 0]
+            )
             continue
-        name = name.strip()
-        info.append([name, value, i])
 
-# ── 2. Named lookup (avoids fragile positional indexing) ────────────────────
-info_dict  = {entry[0]: entry[1] for entry in info}
-info_index = {entry[0]: entry[2] for entry in info}  # line index in file
+        for xlink_a, xlink_b in matched_pairs:
+            connections[xlink_a].append(xlink_b)
+            connections[xlink_b].append(xlink_a)
+            pair_counts[(xlink_a, xlink_b)] += 1
+            chain_edge_rows.append([chain_id, xlink_a, xlink_b])
 
-number_of_monomers      = info_dict["number_of_monomers"]
-box_x                   = info_dict["box_x"]
-box_y                   = info_dict["box_y"]
-box_z                   = info_dict["box_z"]
-number_of_linear_chains = info_dict["number_of_linear_chains"]
-number_of_crosslinkers  = info_dict["number_of_crosslinkers"]
-chainLength             = info_dict["chainLength"]
+    connection_rows = [
+        [xlink_id] + sorted(neighbors)
+        for xlink_id, neighbors in sorted(connections.items())
+    ]
+    max_neighbors = max(len(row) - 1 for row in connection_rows)
+    padded_connections = [
+        row + [0] * (max_neighbors - len(row) + 1)
+        for row in connection_rows
+    ]
+    connection_header = "\t".join(
+        ["xlinkID"] + [f"xlink_{index + 1}" for index in range(max_neighbors)]
+    )
+    np.savetxt(
+        output_dir / suffixed("connected_xlinks.txt"),
+        np.asarray(padded_connections, dtype=int),
+        fmt="%d",
+        delimiter="\t",
+        header=connection_header,
+        comments="",
+    )
 
-params = {
-    "number_of_monomers":      number_of_monomers,
-    "box_x":                   box_x,
-    "box_y":                   box_y,
-    "box_z":                   box_z,
-    "number_of_linear_chains": number_of_linear_chains,
-    "number_of_crosslinkers":  number_of_crosslinkers,
-    "chainLength":             chainLength,
-}
+    chain_edge_array = np.asarray(chain_edge_rows, dtype=int).reshape(-1, 3)
+    np.savetxt(
+        output_dir / suffixed("crosslink_chain_edges.txt"),
+        chain_edge_array,
+        fmt="%d",
+        delimiter="\t",
+        header="chainID\txlinkA\txlinkB",
+        comments="",
+    )
 
-with open("system.txt", "w") as f:
-    for key, value in params.items():
-        f.write(f"{key} = {value}\n")
+    has_connected_pair = (chain_edge_array[:, 1] > 0) & (chain_edge_array[:, 2] > 0)
+    connected_pairs = chain_edge_array[has_connected_pair]
+    local_xlink_a = connected_pairs[:, 1]
+    local_xlink_b = connected_pairs[:, 2]
+    crosslink_position_start = len(positions) - number_of_crosslinkers
+    crosslink_positions = positions[crosslink_position_start:]
+    position_a = crosslink_positions[local_xlink_a - 1]
+    position_b = crosslink_positions[local_xlink_b - 1]
+    deltas = position_b - position_a
+    deltas[:, periodic] -= box[periodic] * np.floor(
+        deltas[:, periodic] / box[periodic] + 0.5
+    )
+    squared_distances = np.einsum("ij,ij->i", deltas, deltas)
+    bfm_xlink_offset = chain_length * number_of_linear_chains
+    distance_rows = np.column_stack(
+        (
+            bfm_xlink_offset + local_xlink_a,
+            bfm_xlink_offset + local_xlink_b,
+            squared_distances,
+            connected_pairs[:, 0],
+        )
+    )
+    np.savetxt(
+        output_dir / suffixed("crosslink_squared_distances.txt"),
+        distance_rows,
+        fmt=["%d", "%d", "%.8f", "%d"],
+        delimiter="\t",
+        header="xlinkID_BFM\tconnectedXlinkID_BFM\tsquaredDistance\tchainID",
+        comments="",
+    )
 
-# ── 3. Parse bonds ────────────────────────────────────────────────────────────
-bonds_raw = "".join(data[data.index("!bonds\n") + 1 : info_index["box_x"]])
-bonds = np.fromstring(bonds_raw, sep=" ", dtype=float).reshape(-1, 2)
+    weighted_edges = np.asarray(
+        [[xlink_a, xlink_b, count] for (xlink_a, xlink_b), count in sorted(pair_counts.items())],
+        dtype=int,
+    ).reshape(-1, 3)
+    np.savetxt(
+        output_dir / suffixed("crosslink_edges_weighted.txt"),
+        weighted_edges,
+        fmt="%d",
+        delimiter="\t",
+        header="xlinkA\txlinkB\tn_strands",
+        comments="",
+    )
 
-# Column order not guaranteed in the file — sort each row so the chain monomer
-# (always the smaller global ID) is column 0, crosslinker is column 1.
-bonds = np.sort(bonds, axis=1)
+    print(f"Saved extracted tables in {output_dir}")
+    print(f"Linear chains accounted for: {len(chains)}")
+    print(
+        "Chains with two or more crosslinkers:",
+        sum(len(row) >= 3 for row in chains),
+    )
+    print(
+        "Self-connected chain pairs:",
+        sum(count for (xlink_a, xlink_b), count in pair_counts.items() if xlink_a == xlink_b),
+    )
 
-# ── 4. Derive chain ID and local crosslinker ID ──────────────────────────────
-chain_monomers = bonds[:, 0]
-xlink_globals  = bonds[:, 1]
 
-n_linear_chains = int(number_of_linear_chains)
-n_crosslinkers = int(number_of_crosslinkers)
-chain_length = int(chainLength)
-chainsID = ((chain_monomers - 1) // chain_length + 1).astype(int)
-xlink = (xlink_globals - chain_length * n_linear_chains).astype(int)
-if np.any((chainsID < 1) | (chainsID > n_linear_chains)):
-    raise ValueError("Bond data contains an invalid linear-chain ID.")
-if np.any((xlink < 1) | (xlink > n_crosslinkers)):
-    raise ValueError("Bond data contains an invalid crosslinker ID.")
+def main():
+    start = time.time()
+    bfm_file = get_bfm_file()
+    output_suffix = sys.argv[2] if len(sys.argv) > 2 else ""
+    if output_suffix and not output_suffix.startswith("_"):
+        output_suffix = f"_{output_suffix}"
+    output_dir = (
+        bfm_file.parent
+        if len(sys.argv) > 1
+        else OUTPUT_DIR
+    )
+    metadata, bonds, positions = read_bfm_file(bfm_file)
+    write_extracted_tables(
+        list(metadata.items()),
+        metadata,
+        bonds,
+        positions,
+        output_dir,
+        output_suffix,
+    )
+    print(f"Execution time: {time.time() - start:.2f} seconds")
 
-# Include all chains, including those with zero or one crosslinker.
-chain_to_xlinks = [set() for _ in range(n_linear_chains + 1)]
-for chain_id, xlink_id in zip(chainsID, xlink):
-    chain_to_xlinks[chain_id].add(xlink_id)
-chains_xlinks = [
-    [chain_id] + sorted(chain_to_xlinks[chain_id])
-    for chain_id in range(1, n_linear_chains + 1)
-]
 
-max_chain_xlinks = max((len(row) - 1 for row in chains_xlinks), default=0)
-chain_rows = [
-    row + [0] * (max_chain_xlinks - (len(row) - 1))
-    for row in chains_xlinks
-]
-chain_header = "\t".join(
-    ["chainID"] + [f"xlink_{i+1}" for i in range(max_chain_xlinks)]
-)
-np.savetxt(
-    "chain_xlinks.txt",
-    np.asarray(chain_rows, dtype=int),
-    fmt="%d",
-    delimiter="\t",
-    header=chain_header,
-    comments="",
-)
-
-chain_link_counts = Counter(len(row) - 1 for row in chains_xlinks)
-print(f"Linear chains accounted for: {len(chains_xlinks)}")
-print(f"Chains with two or more crosslinkers: {sum(count for n, count in chain_link_counts.items() if n >= 2)}")
-print(f"Chains with one crosslinker: {chain_link_counts[1]}")
-print(f"Chains with no crosslinkers: {chain_link_counts[0]}")
-
-# ── 6. Build crosslinker connection graph — PRESERVE MULTI-EDGES ────────────
-# Using a list (not a set): if two different chains both bridge the same pair
-# of crosslinkers, that pair appears twice, three times, etc. This is required
-# for stress calculations, where each physical strand is a separate
-# load-bearing connection even if it links the same two crosslinkers as
-# another strand.
-connections = {xlink_id: [] for xlink_id in range(1, n_crosslinkers + 1)}
-pair_counts = Counter()
-chain_edge_rows = []
-
-for row in chains_xlinks:
-    chain_id = row[0]
-    xlinks = [int(x) for x in row[1:]]
-    if len(xlinks) < 2:
-        # Zero marks a missing endpoint for chains that do not bridge two crosslinkers.
-        chain_edge_rows.append([chain_id, xlinks[0] if xlinks else 0, 0])
-        continue
-    for i in range(len(xlinks)):
-        for j in range(i + 1, len(xlinks)):
-            x1, x2 = xlinks[i], xlinks[j]
-            connections[x1].append(x2)
-            connections[x2].append(x1)
-            pair = tuple(sorted((x1, x2)))
-            pair_counts[pair] += 1
-            chain_edge_rows.append([chain_id, pair[0], pair[1]])
-
-# ── 7. Build padded output table (duplicates kept, sorted for readability) ──
-rows = []
-for xlink_id, conn_list in sorted(connections.items()):
-    rows.append([xlink_id] + sorted(conn_list))
-
-max_len = max(len(r) - 1 for r in rows)
-rows_padded = np.array(
-    [r + [0] * (max_len - (len(r) - 1)) for r in rows],
-    dtype=int
-)
-
-header = "\t".join(["xlinkID"] + [f"xlink_{i+1}" for i in range(max_len)])
-np.savetxt("connected_xlinks.txt", rows_padded, fmt="%.0f",
-           delimiter="\t", header=header, comments="")
-
-# ── 7b. Save each chain with crosslink endpoint IDs and its exact chain ID ───
-chain_edge_rows = np.asarray(chain_edge_rows, dtype=int).reshape(-1, 3)
-np.savetxt(
-    "crosslink_chain_edges.txt",
-    chain_edge_rows,
-    fmt="%d",
-    delimiter="\t",
-    header="chainID\txlinkA\txlinkB",
-    comments="",
-)
-
-# ── 7c. Save unique crosslink pairs with their multiplicity ──────────────────
-edge_rows = np.array(
-    [[a, b, w] for (a, b), w in sorted(pair_counts.items())],
-    dtype=int
-)
-np.savetxt("crosslink_edges_weighted.txt", edge_rows, fmt="%d",
-           delimiter="\t", header="xlinkA\txlinkB\tn_strands", comments="")
-
-n_multi = sum(1 for w in pair_counts.values() if w > 1)
-print(f"{n_multi} crosslinker pairs are bridged by more than one strand")
-
-# ── 8. Parse and save crosslinker positions ──────────────────────────────────
-# NOTE: this final slice still relies on the original positional indices
-# (info[13], info[8]) because the header entry marking the start of the
-# conformation block doesn't have a clean, reliably-named key in this file
-# format (it appears to be the same line used for "mcs"). If you can confirm
-# the exact !key name for that line, this can be converted to a named lookup
-# like the rest of the script — tell me the key and I'll fix it.
-crosslinks = "".join(data[info[13][2] + 1 + int(info[8][1]):])
-crosslinks = np.fromstring(crosslinks, sep=" ", dtype=float).reshape(-1, 3)
-np.savetxt("crosslinks-positions.txt", crosslinks, fmt="%.0f")
-
-bond_lengths = np.zeros(len(chain_edge_rows), dtype=float)
-has_both_crosslinks = (chain_edge_rows[:, 1] > 0) & (chain_edge_rows[:, 2] > 0)
-bond_pairs = chain_edge_rows[has_both_crosslinks, 1:3] - 1
-bond_delta = crosslinks[bond_pairs[:, 1]] - crosslinks[bond_pairs[:, 0]]
-box = np.array([box_x, box_y, box_z])
-bond_delta -= box * np.floor(bond_delta / box + 0.5)
-bond_lengths[has_both_crosslinks] = np.linalg.norm(bond_delta, axis=1)
-bond_length_order = np.lexsort(
-    (chain_edge_rows[:, 2], chain_edge_rows[:, 1], chain_edge_rows[:, 0])
-)
-np.savetxt(
-    "chain_bond_lengths.txt",
-    np.column_stack((chain_edge_rows, bond_lengths))[bond_length_order],
-    fmt=["%d", "%d", "%d", "%.8f"],
-    delimiter="\t",
-    header="chainID\txlinkA\txlinkB\tbondLength",
-    comments="",
-)
-
-print(f"Execution time: {time.time() - t0:.2f} seconds")
+if __name__ == "__main__":
+    main()

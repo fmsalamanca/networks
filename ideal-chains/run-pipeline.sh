@@ -6,8 +6,8 @@ ROOT_DIR="/c/users/fernando/Nextcloud/PostDoc/IPF/simulation/data/raw-data/f3"  
 PYTHON="python3"                             # or "python", or a venv path
 # ────────────────────────────────────────────────────────────────
 
-# Find every LastConfig.bfm, anywhere under ROOT_DIR
-find "$ROOT_DIR" -name "LastConfig.bfm" | sort | while read -r bfm_file; do
+# Find every LastConfig2.bfm, anywhere under ROOT_DIR
+find "$ROOT_DIR" -name "LastConfig2.bfm" | sort | while read -r bfm_file; do
 
     bfm_dir="$(dirname "$bfm_file")"
     echo "──────────────────────────────────────────"
@@ -24,7 +24,7 @@ find "$ROOT_DIR" -name "LastConfig.bfm" | sort | while read -r bfm_file; do
 
     # Step 1 — prepare input
     echo "  Running extractPosConn.py ..."
-    "$PYTHON" -u "$SCRIPTS_DIR/extractPosConn.py"
+    "$PYTHON" -u "$SCRIPTS_DIR/extractPosConn.py" "$bfm_file"
     if [ $? -ne 0 ]; then
         echo "  ERROR: extractPosConn.py failed in $bfm_dir, skipping minimization."
         continue

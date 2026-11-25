@@ -13,10 +13,10 @@ POSITIONS_FILE = "crosslinks-positions.txt"
 CONNECTIONS_FILE = "connected_xlinks.txt"
 SYSTEM_FILE = "system.txt"
 BFM_DISTANCE_TABLE_FILE = os.path.join(
-    BFM_DATA_DIR, "crosslink_squared_distances_from_bfm.txt"
+    BFM_DATA_DIR, "crosslink_squared_distances.txt"
 )
 BFM_CHAIN_EDGE_FILE = os.path.join(
-    BFM_DATA_DIR, "crosslink_chain_edges_from_bfm.txt"
+    BFM_DATA_DIR, "crosslink_chain_edges.txt"
 )
 
 @numba.njit

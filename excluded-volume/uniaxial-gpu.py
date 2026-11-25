@@ -15,10 +15,10 @@ POSITIONS_FILE = "crosslinks-positions.txt"
 CONNECTIONS_FILE = "connected_xlinks.txt"
 SYSTEM_FILE = "system.txt"
 BFM_DISTANCE_TABLE_FILE = os.path.join(
-    BFM_DATA_DIR, "crosslink_squared_distances_from_bfm.txt"
+    BFM_DATA_DIR, "crosslink_squared_distances.txt"
 )
 BFM_CHAIN_EDGE_FILE = os.path.join(
-    BFM_DATA_DIR, "crosslink_chain_edges_from_bfm.txt"
+    BFM_DATA_DIR, "crosslink_chain_edges.txt"
 )
 energy_history = []
 energy_steps = []
@@ -305,7 +305,7 @@ def _compute_total_delta_gpu(positions, connections, box):
     return total_delta.copy_to_host()
 
 
-def func(positions, connections, box, max_steps=10000, b=np.sqrt(10), N=None, tolerance=1e-4):
+def func(positions, connections, box, max_steps=10000, b=np.sqrt(10), N=None, tolerance=1e-8):
     global energy_recorded
     record_energy = not energy_recorded
     energy_recorded = True
@@ -359,7 +359,10 @@ def func(positions, connections, box, max_steps=10000, b=np.sqrt(10), N=None, to
         prev_energy = current_energy
         step += 1
 
-    print("Equilibration finished in",step,"steps with energy difference=",energy_diff,"and final energy=",current_energy)
+    print(
+        f"Equilibration finished in {step} steps with "
+        f"energy difference={energy_diff:.30f} and final energy={current_energy:.0f}"
+    )
     return device_positions.copy_to_host()
 
 def breakage_potential(positions, connections, box, U_crit,b=np.sqrt(10),N=None,log_file=None):
@@ -690,7 +693,47 @@ if not np.array_equal(
     )
 
 L_prev = box_x
-pos_prev = func(positions, connections, box,N=chainLength+1)
+positions = func(positions, connections, box, N=chainLength + 1)
+
+bond_lengths_squared = np.zeros(len(chain_ids), dtype=np.float64)
+bond_delta = positions[chain_xlink_b[has_chain_pair] - 1] - positions[
+    chain_xlink_a[has_chain_pair] - 1
+]
+bond_delta[:, periodic] -= box[periodic] * np.floor(
+    bond_delta[:, periodic] / box[periodic] + 0.5
+)
+bond_lengths_squared[has_chain_pair] = np.einsum(
+    "ij,ij->i", bond_delta, bond_delta
+)
+chain_xlink_a_bfm = np.where(
+    chain_xlink_a > 0, xlink_bfm_offset + chain_xlink_a, 0
+)
+chain_xlink_b_bfm = np.where(
+    chain_xlink_b > 0, xlink_bfm_offset + chain_xlink_b, 0
+)
+bond_length_order = np.argsort(chain_ids)
+np.savetxt(
+    os.path.join(OUTPUT_DIR, "chain_bond_lengths.txt"),
+    np.column_stack(
+        (chain_ids, chain_xlink_a_bfm, chain_xlink_b_bfm, bond_lengths_squared)
+    )[bond_length_order],
+    fmt=["%d", "%d", "%d", "%.8f"],
+    delimiter="\t",
+    header="chainID\txlinkA\txlinkB\tbondLength**2",
+    comments="",
+)
+
+EY, dev, fmax, nb = young_modulus_affine(
+    positions, connections, box, N=chainLength + 1, axis=2
+)
+f = connections.shape[1] - 1
+EYid = (f - 2) / f
+print(f"Pre-box-relaxation E_Y = {EY:.6e} kT/L^3  (G = {EY/3:.6e})")
+print(f"Pre-box-relaxation E_Y/E_Y(id) = {EY/EYid:.6e} (ideal chain model with f = {f})")
+print(
+    f"Pre-box-relaxation deviatoric stress = {dev:.3e}, "
+    f"maximum residual force = {fmax:.3e}, bonds = {nb}"
+)
 
 stress_ref = 0
 tol_stress = 1e-6
@@ -787,33 +830,6 @@ if (
 ):
     raise ValueError("BFM distance table does not match self-connections in the connection table.")
 
-bond_lengths_squared = np.zeros(len(chain_ids), dtype=np.float64)
-bond_delta = positions[chain_xlink_b[has_chain_pair] - 1] - positions[
-    chain_xlink_a[has_chain_pair] - 1
-]
-bond_delta[:, periodic] -= box[periodic] * np.floor(
-    bond_delta[:, periodic] / box[periodic] + 0.5
-)
-bond_lengths_squared[has_chain_pair] = np.einsum(
-    "ij,ij->i", bond_delta, bond_delta
-)
-chain_xlink_a_bfm = np.where(
-    chain_xlink_a > 0, xlink_bfm_offset + chain_xlink_a, 0
-)
-chain_xlink_b_bfm = np.where(
-    chain_xlink_b > 0, xlink_bfm_offset + chain_xlink_b, 0
-)
-bond_length_order = np.argsort(chain_ids)
-np.savetxt(
-    os.path.join(OUTPUT_DIR, "chain_bond_lengths.txt"),
-    np.column_stack(
-        (chain_ids, chain_xlink_a_bfm, chain_xlink_b_bfm, bond_lengths_squared)
-    )[bond_length_order],
-    fmt=["%d", "%d", "%d", "%.8f"],
-    delimiter="\t",
-    header="chainID\txlinkA\txlinkB\tbondLength**2",
-    comments="")
-
 stress = stress[2] - (stress[0]+stress[1])/2
 np.savetxt(
     os.path.join(OUTPUT_DIR, "initial_equilibrated_positions.txt"),
@@ -821,12 +837,6 @@ np.savetxt(
     fmt=["%.4f", "%.4f", "%.4f"],
     delimiter="\t")
 
-EY, dev, fmax, nb = young_modulus_affine(positions, connections, box, N=chainLength+1, axis=2)
-f = connections.shape[1]-1  # número de conexiones por partícula (first col is id)
-EYid = (f - 2) / f # Adjusted Young's modulus for ideal chains
-print(f"E_Y = {EY:.6e} kT/L^3  (G = {EY/3:.6e})")
-print(f"E_Y/E_Y(id) = {EY/EYid:.6e} (ideal chain model with f = {f})")
-print(f"tensión desviadora = {dev:.3e}, fuerza residual máx = {fmax:.3e}, enlaces = {nb}")
 print(count_bonds(connections, len(positions)), "bonds in the system")
 #print("strain-controlled deformation with bond breakage...")
 # ----------------------------
