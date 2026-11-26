@@ -193,12 +193,23 @@ def young_modulus_affine(positions, connections, box, N, b=np.sqrt(10), axis=2):
     """
     k = 1.0 / (N * b**2)                        # E_enlace = k r^2 / 2  (en kT)
 
-    # lista de enlaces únicos (no asumo simetría ni cuento dos veces)
+    # Reciprocal rows describe one link; repeated entries preserve multiplicity.
     conn = connections[:, 1:]
     ii = np.repeat(connections[:, 0], conn.shape[1])
     jj = conn.ravel()
     m = (jj >= 0) & (jj < len(positions)) & (jj != ii)
-    pairs = np.unique(np.sort(np.column_stack((ii[m], jj[m])), axis=1), axis=0)
+    directed_pairs = np.column_stack((ii[m], jj[m]))
+    pairs, pair_indices = np.unique(
+        np.sort(directed_pairs, axis=1), axis=0, return_inverse=True
+    )
+    source_is_larger = directed_pairs[:, 0] > directed_pairs[:, 1]
+    directional_counts = np.zeros((len(pairs), 2), dtype=np.int64)
+    np.add.at(
+        directional_counts,
+        (pair_indices, source_is_larger.astype(np.intp)),
+        1,
+    )
+    pairs = np.repeat(pairs, directional_counts.max(axis=1), axis=0)
 
     # vectores de enlace con imagen mínima (igual que en func)
     d = positions[pairs[:, 1]] - positions[pairs[:, 0]]

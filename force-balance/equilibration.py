@@ -22,7 +22,7 @@ BFM_CHAIN_EDGE_FILE = os.path.join(
 )
 
 @numba.njit
-def func(positions, connections, box, max_steps=10000, b=np.sqrt(10), N=None, tolerance=1e-4, energy_output=None):
+def func(positions, connections, box, max_steps=10000, b=2.636, N=None, tolerance=1e-4, energy_output=None):
     step = 0
     prev_energy = np.inf
     while step < max_steps:
@@ -83,7 +83,7 @@ def func(positions, connections, box, max_steps=10000, b=np.sqrt(10), N=None, to
     print("Equilibration finished in",step,"steps with energy difference=",energy_diff,"and final energy=",current_energy)
     return positions
 
-def breakage_potential(positions, connections, box, U_crit,b=np.sqrt(10),N=None,log_file=None):
+def breakage_potential(positions, connections, box, U_crit,b=2.636,N=None,log_file=None):
     broken = False
     rows = np.arange(connections.shape[0])
     np.random.shuffle(rows)
@@ -115,7 +115,7 @@ def breakage_potential(positions, connections, box, U_crit,b=np.sqrt(10),N=None,
                             f.write(f"{bond_pair[0]} {bond_pair[1]}\n")
     return connections, broken
 
-def compute_total_stress(positions, connections, box,N=None,b=np.sqrt(10)):
+def compute_total_stress(positions, connections, box,N=None,b=2.636):
     total_delta = np.zeros(3, dtype=positions.dtype)
     for row in range(connections.shape[0]):
         i = connections[row, 0]
@@ -137,7 +137,7 @@ def compute_total_stress(positions, connections, box,N=None,b=np.sqrt(10)):
 
     return stress
 
-def compute_total_force(positions, connections, box,N=None,b=np.sqrt(10)):
+def compute_total_force(positions, connections, box,N=None,b=2.636):
     rows = np.arange(connections.shape[0])
     np.random.shuffle(rows)
     total_delta = np.zeros(3, dtype=positions.dtype)
@@ -178,20 +178,45 @@ def bond_entries(connections, n_positions=None):
 def count_bonds(connections, n_positions=None):
     return len(bond_entries(connections, n_positions))
 
-def young_modulus_affine(positions, connections, box, N, b=np.sqrt(10), axis=2):
-    """
-    Módulo de Young (tracción uniaxial incompresible, F = diag(lam, lam^-1/2, lam^-1/2)
-    a lo largo de `axis`) a partir de las distancias entre partículas del estado equilibrado.
-    Unidades: kT / (unidad de longitud)^3.
-    """
-    k = 1.0 / (N * b**2)                        # E_enlace = k r^2 / 2  (en kT)
+def young_modulus_affine(positions, connections, box, N, b=2.636, axis=2):
+    """Return a strand-averaged normalized extension and affine diagnostics.
 
-    # lista de enlaces únicos (no asumo simetría ni cuento dos veces)
+    For each eligible strand, ``r`` is the minimum-image end-to-end vector.
+    The first result is
+
+        g_bar = mean(|r|^2 / (N * b^2))
+
+    where ``N * b^2`` is the ideal-chain mean-square size. Reciprocal
+    connection entries represent one strand, parallel strands retain their
+    multiplicity, and self-links are excluded. Thus ``g_bar`` is a
+    dimensionless per-strand average, not the bulk modulus itself.
+
+    Under the model ``G = g * nu * kBT``, form ``G`` by applying the chosen
+    numerical correction to ``g_bar`` and multiplying by ``nu`` (the number
+    density of the same strand population) and ``kBT``. ``dev`` is the
+    strand-averaged deviatoric contribution along ``axis``; ``fmax`` is the
+    maximum residual force magnitude. The return value also includes the
+    number of eligible strand instances.
+    """
+    k = 1.0 / (N * b**2)  # inverse ideal-chain mean-square size
+
+    # Reciprocal rows describe one link; repeated entries preserve multiplicity.
     conn = connections[:, 1:]
     ii = np.repeat(connections[:, 0], conn.shape[1])
     jj = conn.ravel()
     m = (jj >= 0) & (jj < len(positions)) & (jj != ii)
-    pairs = np.unique(np.sort(np.column_stack((ii[m], jj[m])), axis=1), axis=0)
+    directed_pairs = np.column_stack((ii[m], jj[m]))
+    pairs, pair_indices = np.unique(
+        np.sort(directed_pairs, axis=1), axis=0, return_inverse=True
+    )
+    source_is_larger = directed_pairs[:, 0] > directed_pairs[:, 1]
+    directional_counts = np.zeros((len(pairs), 2), dtype=np.int64)
+    np.add.at(
+        directional_counts,
+        (pair_indices, source_is_larger.astype(np.intp)),
+        1,
+    )
+    pairs = np.repeat(pairs, directional_counts.max(axis=1), axis=0)
 
     # vectores de enlace con imagen mínima (igual que en func)
     d = positions[pairs[:, 1]] - positions[pairs[:, 0]]
@@ -200,9 +225,8 @@ def young_modulus_affine(positions, connections, box, N, b=np.sqrt(10), axis=2):
     dx2 = d[:, axis]**2
     s = 2 * dx2 - (r2 - dx2)                    # 2Δ_par² − Δ_perp²
 
-    EY  = k * np.sum(r2) / len(d)                    # d²E/dλ² / V
-    
-    dev = 0.5 * k * np.sum(s) / len(d)                # tensión desviadora (debe ser ~0)
+    g_bar = k * np.mean(r2)
+    dev = 0.5 * k * np.sum(s) / len(s)                # tensión desviadora (debe ser ~0)
 
     # fuerza residual por partícula: k·Σ_j Δ_ij (debe ser ~0 si está equilibrado)
     F = np.zeros_like(positions)
@@ -210,7 +234,7 @@ def young_modulus_affine(positions, connections, box, N, b=np.sqrt(10), axis=2):
     np.add.at(F, pairs[:, 1], -k * d)
     fmax = np.abs(F).max()
 
-    return EY, dev, fmax, len(pairs)
+    return g_bar, dev, fmax, len(pairs)
 
 ###################################################
 
@@ -426,14 +450,19 @@ np.savetxt(
     comments="",
 )
 
-EY, dev, fmax, nb = young_modulus_affine(
+g_bar, dev, fmax, nb = young_modulus_affine(
     positions, connections, box, N=chainLength + 1, axis=2
 )
+# For N=8, f=3: b=2.636 (doi:10.1103/physreve.76.011803),
+# Rf=9.437 (doi:10.1021/acs.macromol.2c00660).
+correction = 2.636**2 / 9.437
+g_corrected = g_bar * correction
+
 f = connections.shape[1] - 1
-EYid = (f - 2) / f
-print(f"Pre-box-relaxation E_Y = {EY:.6e} kT/L^3  (G = {EY/3:.6e})")
+g_ideal = (f - 2) / f
+print(f"Pre-box-relaxation corrected g = {g_corrected:.6e}")
 print(
-    f"Pre-box-relaxation E_Y/E_Y(id) = {EY/EYid:.6e} "
+    f"Pre-box-relaxation corrected g/g_ideal = {g_corrected/g_ideal:.6e} "
     f"(ideal chain model with f = {f})"
 )
 

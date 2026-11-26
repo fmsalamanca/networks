@@ -21,11 +21,6 @@ BFM_DISTANCE_TABLE_FILE = os.path.join(
 BFM_CHAIN_EDGE_FILE = os.path.join(
     BFM_EXTRACTED_TABLES_DIR, "crosslink_chain_edges.txt"
 )
-energy_history = []
-energy_steps = []
-energy_recorded = False
-
-
 @cuda.jit
 def _relax_step_kernel(
     positions, connections, row_order, box, N, b, new_positions, row_energies
@@ -306,10 +301,21 @@ def _compute_total_delta_gpu(positions, connections, box):
     return total_delta.copy_to_host()
 
 
-def func(positions, connections, box, max_steps=10000, b=np.sqrt(10), N=None, tolerance=1e-8):
-    global energy_recorded
-    record_energy = not energy_recorded
-    energy_recorded = True
+def func(
+    positions,
+    connections,
+    box,
+    max_steps=10000,
+    b=2.636,
+    N=None,
+    tolerance=1e-4,
+    energy_output=None,
+):
+    """Relax the network and optionally record total energy for each sweep.
+
+    ``energy_output`` is a host-side array indexed from zero; each completed
+    sweep writes its total energy before the convergence check.
+    """
     if connections.shape[0] == 0:
         return positions.copy()
     if N is None:
@@ -349,9 +355,8 @@ def func(positions, connections, box, max_steps=10000, b=np.sqrt(10), N=None, to
             row_energies, total_energy, connections.shape[0]
         )
         current_energy = total_energy.copy_to_host()[0]
-        if record_energy:
-            energy_steps.append(step + 1)
-            energy_history.append(current_energy)
+        if energy_output is not None:
+            energy_output[step] = current_energy
 
         energy_diff = np.abs(prev_energy-current_energy)
         device_positions, next_positions = next_positions, device_positions
@@ -366,7 +371,7 @@ def func(positions, connections, box, max_steps=10000, b=np.sqrt(10), N=None, to
     )
     return device_positions.copy_to_host()
 
-def breakage_potential(positions, connections, box, U_crit,b=np.sqrt(10),N=None,log_file=None):
+def breakage_potential(positions, connections, box, U_crit,b=2.636,N=None,log_file=None):
     if N is None:
         raise ValueError("N must be specified for GPU bond-breakage checks.")
 
@@ -431,7 +436,7 @@ def breakage_potential(positions, connections, box, U_crit,b=np.sqrt(10),N=None,
 
     return connections, broken
 
-def compute_total_stress(positions, connections, box,N=None,b=np.sqrt(10)):
+def compute_total_stress(positions, connections, box,N=None,b=2.636):
     if N is None:
         raise ValueError("N must be specified for GPU stress calculation.")
     total_delta = _compute_total_delta_gpu(positions, connections, box)
@@ -440,7 +445,7 @@ def compute_total_stress(positions, connections, box,N=None,b=np.sqrt(10)):
 
     return stress
 
-def compute_total_force(positions, connections, box,N=None,b=np.sqrt(10)):
+def compute_total_force(positions, connections, box,N=None,b=2.636):
     if N is None:
         raise ValueError("N must be specified for GPU force calculation.")
     total_delta = _compute_total_delta_gpu(positions, connections, box)
@@ -471,23 +476,47 @@ def connection_table_for_output(connections):
     return ordered + 1
 
 
-def young_modulus_affine(positions, connections, box, N, b=np.sqrt(10), axis=2):
+def young_modulus_affine(positions, connections, box, N, b=2.636, axis=2):
+    """Return a strand-averaged normalized extension and affine diagnostics.
+
+    For each eligible strand, ``r`` is the minimum-image end-to-end vector.
+    The first result is
+
+        g_bar = mean(|r|^2 / (N * b^2))
+
+    where ``N * b^2`` is the ideal-chain mean-square size. Reciprocal
+    connection entries represent one strand, parallel strands retain their
+    multiplicity, and self-links are excluded. Thus ``g_bar`` is a
+    dimensionless per-strand average, not the bulk modulus itself.
+
+    Under the model ``G = g * nu * kBT``, form ``G`` by applying the chosen
+    numerical correction to ``g_bar`` and multiplying by ``nu`` (the number
+    density of the same strand population) and ``kBT``. ``dev`` is the
+    strand-averaged deviatoric contribution along ``axis``; ``fmax`` is the
+    maximum residual force magnitude. The return value also includes the
+    number of eligible strand instances.
     """
-    Módulo de Young (tracción uniaxial incompresible, F = diag(lam, lam^-1/2, lam^-1/2)
-    a lo largo de `axis`) a partir de las distancias entre partículas del estado equilibrado.
-    Unidades: kT / (unidad de longitud)^3.
-    """
-    k = 1.0 / (N * b**2)                        # E_enlace = k r^2 / 2  (en kT)
-    V = np.prod(box)
+    k = 1.0 / (N * b**2)  # inverse ideal-chain mean-square size
     if axis not in (0, 1, 2):
         raise ValueError("axis must be 0, 1, or 2.")
 
-    # lista de enlaces únicos (no asumo simetría ni cuento dos veces)
+    # Reciprocal rows describe one link; repeated entries preserve multiplicity.
     conn = connections[:, 1:]
     ii = np.repeat(connections[:, 0], conn.shape[1])
     jj = conn.ravel()
     m = (jj >= 0) & (jj < len(positions)) & (jj != ii)
-    pairs = np.unique(np.sort(np.column_stack((ii[m], jj[m])), axis=1), axis=0)
+    directed_pairs = np.column_stack((ii[m], jj[m]))
+    pairs, pair_indices = np.unique(
+        np.sort(directed_pairs, axis=1), axis=0, return_inverse=True
+    )
+    source_is_larger = directed_pairs[:, 0] > directed_pairs[:, 1]
+    directional_counts = np.zeros((len(pairs), 2), dtype=np.int64)
+    np.add.at(
+        directional_counts,
+        (pair_indices, source_is_larger.astype(np.intp)),
+        1,
+    )
+    pairs = np.repeat(pairs, directional_counts.max(axis=1), axis=0)
 
     positions = np.ascontiguousarray(positions)
     pairs = np.ascontiguousarray(pairs)
@@ -532,10 +561,19 @@ def young_modulus_affine(positions, connections, box, N, b=np.sqrt(10), axis=2):
     )
     sum_r2, sum_s, fmax = totals.copy_to_host()
 
-    EY = k * sum_r2 / pair_count  # d²E/dλ² / V
+    g_bar = k * sum_r2 / pair_count
+    print(
+        pair_count,
+        "strands, k =",
+        k,
+        "sum(r2) =",
+        sum_r2,
+        "g_bar =",
+        g_bar,
+    )
 
     dev = 0.5 * k * sum_s / pair_count  # tensión desviadora (debe ser ~0)
-    return EY, dev, fmax, pair_count
+    return g_bar, dev, fmax, pair_count
 
 ###################################################
 
@@ -692,8 +730,18 @@ if not np.array_equal(
     )
 
 L_prev = box_x
-positions = func(positions, connections, box, N=chainLength + 1)
-
+# NaNs mark unused buffer entries after convergence.
+first_call_energy = np.full(10000, np.nan, dtype=np.float64)
+positions = func(
+    positions,
+    connections,
+    box,
+    N=chainLength + 1,
+    tolerance=1e-8,
+    energy_output=first_call_energy,
+)
+energy_history = first_call_energy[~np.isnan(first_call_energy)]
+energy_steps = np.flatnonzero(~np.isnan(first_call_energy)) + 1
 bond_lengths_squared = np.zeros(len(chain_ids), dtype=np.float64)
 bond_delta = positions[chain_xlink_b[has_chain_pair] - 1] - positions[
     chain_xlink_a[has_chain_pair] - 1
@@ -722,13 +770,20 @@ np.savetxt(
     comments="",
 )
 
-EY, dev, fmax, nb = young_modulus_affine(
+g_bar, dev, fmax, nb = young_modulus_affine(
     positions, connections, box, N=chainLength + 1, axis=2
 )
+# For N=8, f=3: b=2.636 (doi:10.1103/physreve.76.011803),
+# Rf=9.437 (doi:10.1021/acs.macromol.2c00660).
+correction = 2.636**2 / 9.437
+g_corrected = g_bar * correction
 f = connections.shape[1] - 1
-EYid = (f - 2) / f
-print(f"Pre-box-relaxation E_Y = {EY:.6e} kT/L^3  (G = {EY/3:.6e})")
-print(f"Pre-box-relaxation E_Y/E_Y(id) = {EY/EYid:.6e} (ideal chain model with f = {f})")
+g_ideal = (f - 2) / f
+print(f"Pre-box-relaxation corrected g = {g_corrected:.6e}")
+print(
+    f"Pre-box-relaxation corrected g/g_ideal = {g_corrected/g_ideal:.6e} "
+    f"(ideal chain model with f = {f})"
+)
 
 np.savez_compressed(
     os.path.join(OUTPUT_DIR, "equilibration_state.npz"),
