@@ -311,11 +311,6 @@ def func(
     tolerance=1e-4,
     energy_output=None,
 ):
-    """Relax the network and optionally record total energy for each sweep.
-
-    ``energy_output`` is a host-side array indexed from zero; each completed
-    sweep writes its total energy before the convergence check.
-    """
     if connections.shape[0] == 0:
         return positions.copy()
     if N is None:
@@ -730,7 +725,6 @@ if not np.array_equal(
     )
 
 L_prev = box_x
-# NaNs mark unused buffer entries after convergence.
 first_call_energy = np.full(10000, np.nan, dtype=np.float64)
 positions = func(
     positions,

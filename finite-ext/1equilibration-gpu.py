@@ -9,6 +9,7 @@ import random
 from matplotlib import pyplot as plt
 
 OUTPUT_DIR = "output-gpu"
+DAMPING_FACTOR = 0.25
 BROKEN_CONNECTIONS_LOG = os.path.join(OUTPUT_DIR, "broken_connections.txt")
 BFM_DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "force-balance"))
 BFM_EXTRACTED_TABLES_DIR = os.path.join(BFM_DATA_DIR, "extracted_tables")
@@ -28,7 +29,15 @@ energy_recorded = False
 
 @cuda.jit
 def _relax_step_kernel(
-    positions, connections, row_order, box, N, b, new_positions, row_energies
+    positions,
+    connections,
+    row_order,
+    box,
+    N,
+    b,
+    damping_factor,
+    new_positions,
+    row_energies,
 ):
     row_slot = cuda.grid(1)
     if row_slot >= row_order.shape[0]:
@@ -64,9 +73,9 @@ def _relax_step_kernel(
                 count += 1
 
     if count > 0:
-        new_pos0 = pos0 + sum_delta0 / count
-        new_pos1 = pos1 + sum_delta1 / count
-        new_pos2 = pos2 + sum_delta2 / count
+        new_pos0 = pos0 + damping_factor * sum_delta0 / count
+        new_pos1 = pos1 + damping_factor * sum_delta1 / count
+        new_pos2 = pos2 + damping_factor * sum_delta2 / count
         new_pos0 -= box[0] * math.floor(new_pos0 / box[0])
         new_pos1 -= box[1] * math.floor(new_pos1 / box[1])
         new_pos2 -= box[2] * math.floor(new_pos2 / box[2])
@@ -306,7 +315,19 @@ def _compute_total_delta_gpu(positions, connections, box):
     return total_delta.copy_to_host()
 
 
-def func(positions, connections, box, max_steps=10000, b=2.636, N=None, tolerance=1e-8):
+def func(
+    positions,
+    connections,
+    box,
+    max_steps=100000,
+    b=2.636,
+    N=None,
+    tolerance=1e-8,
+    damping_factor=DAMPING_FACTOR,
+):
+    """Relax the network, damping each move toward the neighbor centroid."""
+    if not 0.0 <= damping_factor <= 1.0:
+        raise ValueError("damping_factor must be in the interval [0, 1].")
     global energy_recorded
     record_energy = not energy_recorded
     energy_recorded = True
@@ -342,6 +363,7 @@ def func(positions, connections, box, max_steps=10000, b=2.636, N=None, toleranc
             device_box,
             N,
             b,
+            damping_factor,
             next_positions,
             row_energies,
         )
@@ -725,7 +747,13 @@ if not np.array_equal(
     )
 
 L_prev = box_x
-positions = func(positions, connections, box, N=chainLength + 1)
+positions = func(
+    positions,
+    connections,
+    box,
+    N=chainLength + 1,
+    damping_factor=DAMPING_FACTOR,
+)
 
 bond_lengths_squared = np.zeros(len(chain_ids), dtype=np.float64)
 bond_delta = positions[chain_xlink_b[has_chain_pair] - 1] - positions[
