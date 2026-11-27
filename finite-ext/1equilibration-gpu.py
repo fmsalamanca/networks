@@ -9,7 +9,7 @@ import random
 from matplotlib import pyplot as plt
 
 OUTPUT_DIR = "output-gpu"
-DAMPING_FACTOR = 0.25
+DAMPING_FACTOR = 1.0
 BROKEN_CONNECTIONS_LOG = os.path.join(OUTPUT_DIR, "broken_connections.txt")
 BFM_DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "force-balance"))
 BFM_EXTRACTED_TABLES_DIR = os.path.join(BFM_DATA_DIR, "extracted_tables")
@@ -33,11 +33,9 @@ def _relax_step_kernel(
     connections,
     row_order,
     box,
-    N,
-    b,
     damping_factor,
+    step_scale,
     new_positions,
-    row_energies,
 ):
     row_slot = cuda.grid(1)
     if row_slot >= row_order.shape[0]:
@@ -45,7 +43,6 @@ def _relax_step_kernel(
 
     # Map the randomized execution slot back to its original connection row.
     row = row_order[row_slot]
-    row_energies[row] = 0.0
     i = connections[row, 0]
     pos0 = positions[i, 0]
     pos1 = positions[i, 1]
@@ -53,7 +50,6 @@ def _relax_step_kernel(
     sum_delta0 = pos0 * 0.0
     sum_delta1 = pos1 * 0.0
     sum_delta2 = pos2 * 0.0
-    sum_distance_squared = 0.0
     count = 0
 
     for k in range(1, connections.shape[1]):
@@ -68,21 +64,49 @@ def _relax_step_kernel(
             sum_delta0 += delta0
             sum_delta1 += delta1
             sum_delta2 += delta2
-            sum_distance_squared += delta0**2 + delta1**2 + delta2**2
             if i != conn_val:
                 count += 1
 
     if count > 0:
-        new_pos0 = pos0 + damping_factor * sum_delta0 / count
-        new_pos1 = pos1 + damping_factor * sum_delta1 / count
-        new_pos2 = pos2 + damping_factor * sum_delta2 / count
+        mean_delta0 = sum_delta0 / count
+        mean_delta1 = sum_delta1 / count
+        mean_delta2 = sum_delta2 / count
+        damping_factor *= step_scale
+        new_pos0 = pos0 + damping_factor * mean_delta0
+        new_pos1 = pos1 + damping_factor * mean_delta1
+        new_pos2 = pos2 + damping_factor * mean_delta2
         new_pos0 -= box[0] * math.floor(new_pos0 / box[0])
         new_pos1 -= box[1] * math.floor(new_pos1 / box[1])
         new_pos2 -= box[2] * math.floor(new_pos2 / box[2])
         new_positions[i, 0] = new_pos0
         new_positions[i, 1] = new_pos1
         new_positions[i, 2] = new_pos2
-        row_energies[row] = 1.5 * sum_distance_squared / (N * b**2)
+
+
+@cuda.jit
+def _energy_per_row_kernel(positions, connections, box, N, b, row_energies):
+    row = cuda.grid(1)
+    if row >= connections.shape[0]:
+        return
+
+    row_energies[row] = 0.0
+    i = connections[row, 0]
+    if i < 0 or i >= positions.shape[0]:
+        return
+
+    sum_distance_squared = 0.0
+    for k in range(1, connections.shape[1]):
+        conn_val = connections[row, k]
+        if conn_val >= 0 and conn_val < positions.shape[0]:
+            delta0 = positions[conn_val, 0] - positions[i, 0]
+            delta1 = positions[conn_val, 1] - positions[i, 1]
+            delta2 = positions[conn_val, 2] - positions[i, 2]
+            delta0 -= box[0] * math.floor(delta0 / box[0] + 0.5)
+            delta1 -= box[1] * math.floor(delta1 / box[1] + 0.5)
+            delta2 -= box[2] * math.floor(delta2 / box[2] + 0.5)
+            sum_distance_squared += delta0**2 + delta1**2 + delta2**2
+
+    row_energies[row] = 1.5 * sum_distance_squared / (N * b**2)
 
 
 @cuda.jit
@@ -325,9 +349,7 @@ def func(
     tolerance=1e-8,
     damping_factor=DAMPING_FACTOR,
 ):
-    """Relax the network, damping each move toward the neighbor centroid."""
-    if not 0.0 <= damping_factor <= 1.0:
-        raise ValueError("damping_factor must be in the interval [0, 1].")
+    """Relax the network using one scalar damping factor for every crosslink."""
     global energy_recorded
     record_energy = not energy_recorded
     energy_recorded = True
@@ -335,6 +357,10 @@ def func(
         return positions.copy()
     if N is None:
         raise ValueError("N must be specified for GPU relaxation.")
+    if N <= 0 or b <= 0:
+        raise ValueError("N and b must be positive for GPU relaxation.")
+    if not 0.0 <= damping_factor <= 1.0:
+        raise ValueError("damping_factor must be in the interval [0, 1].")
 
     positions = np.ascontiguousarray(positions)
     connections = np.ascontiguousarray(connections)
@@ -350,37 +376,58 @@ def func(
     total_energy = cuda.device_array(1, dtype=np.float64)
 
     step = 0
-    prev_energy = np.inf
+    _energy_per_row_kernel[blocks, threads_per_block](
+        device_positions, device_connections, device_box, N, b, row_energies
+    )
+    _reduce_energy_kernel[1, threads_per_block](
+        row_energies, total_energy, connections.shape[0]
+    )
+    current_energy = total_energy.copy_to_host()[0]
+    energy_diff = np.inf
     while step < max_steps:
-        next_positions.copy_to_device(device_positions)
-        # Visit every cross-link row once per Monte Carlo step in random order.
-        row_order = np.random.permutation(connections.shape[0]).astype(np.int32)
-        device_row_order.copy_to_device(row_order)
-        _relax_step_kernel[blocks, threads_per_block](
-            device_positions,
-            device_connections,
-            device_row_order,
-            device_box,
-            N,
-            b,
-            damping_factor,
-            next_positions,
-            row_energies,
-        )
-        _reduce_energy_kernel[1, threads_per_block](
-            row_energies, total_energy, connections.shape[0]
-        )
-        current_energy = total_energy.copy_to_host()[0]
+        step_scale = 1.0
+        backtracks = 0
+        while True:
+            next_positions.copy_to_device(device_positions)
+            # Visit every cross-link row once per Monte Carlo step in random order.
+            row_order = np.random.permutation(connections.shape[0]).astype(np.int32)
+            device_row_order.copy_to_device(row_order)
+            _relax_step_kernel[blocks, threads_per_block](
+                device_positions,
+                device_connections,
+                device_row_order,
+                device_box,
+                damping_factor,
+                step_scale,
+                next_positions,
+            )
+            _energy_per_row_kernel[blocks, threads_per_block](
+                next_positions, device_connections, device_box, N, b, row_energies
+            )
+            _reduce_energy_kernel[1, threads_per_block](
+                row_energies, total_energy, connections.shape[0]
+            )
+            candidate_energy = total_energy.copy_to_host()[0]
+            energy_diff = abs(current_energy - candidate_energy)
+            if np.isfinite(candidate_energy) and candidate_energy <= current_energy:
+                break
+            if backtracks == 32:
+                break
+            step_scale *= 0.5
+            backtracks += 1
+
+        if not np.isfinite(candidate_energy) or candidate_energy > current_energy:
+            break
+
+        device_positions, next_positions = next_positions, device_positions
+        current_energy = candidate_energy
+        step += 1
         if record_energy:
-            energy_steps.append(step + 1)
+            energy_steps.append(step)
             energy_history.append(current_energy)
 
-        energy_diff = np.abs(prev_energy-current_energy)
-        device_positions, next_positions = next_positions, device_positions
         if energy_diff < tolerance:
             break
-        prev_energy = current_energy
-        step += 1
 
     print(
         f"Equilibration finished in {step} steps with "
